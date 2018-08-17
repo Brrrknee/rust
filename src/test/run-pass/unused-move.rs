@@ -14,8 +14,7 @@
 
 // pretty-expanded FIXME #23616
 
-#![allow(path_statement)]
-#![allow(unknown_features)]
+#![allow(path_statements)]
 #![feature(box_syntax)]
 
 pub fn main()

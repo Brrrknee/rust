@@ -12,11 +12,9 @@
 
 // pretty-expanded FIXME #23616
 
-#![feature(core)]
-
 use std::cmp::PartialOrd;
 
-pub trait NumCast {
+pub trait NumCast: Sized {
     fn from(i: i32) -> Option<Self>;
 }
 

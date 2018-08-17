@@ -8,9 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(std_misc)]
-
-// no-pretty-expanded FIXME #15189
+// ignore-emscripten no threads support
 
 use std::thread;
 use std::sync::mpsc::{channel, Sender};

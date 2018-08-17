@@ -9,8 +9,7 @@
 // except according to those terms.
 
 
-#![allow(unused_variable)]
-#![allow(unknown_features)]
+#![allow(unused_variables)]
 #![feature(box_syntax)]
 
 pub fn main() {

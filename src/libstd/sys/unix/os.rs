@@ -12,7 +12,6 @@
 
 #![allow(unused_imports)] // lots of cfg code here
 
-use prelude::v1::*;
 use os::unix::prelude::*;
 
 use error::Error as StdError;
@@ -21,35 +20,71 @@ use fmt;
 use io;
 use iter;
 use libc::{self, c_int, c_char, c_void};
+use marker::PhantomData;
 use mem;
+use memchr;
 use path::{self, PathBuf};
 use ptr;
 use slice;
 use str;
-use sync::StaticMutex;
+use sys_common::mutex::Mutex;
 use sys::cvt;
 use sys::fd;
 use vec;
 
 const TMPBUF_SZ: usize = 128;
-static ENV_LOCK: StaticMutex = StaticMutex::new();
+// We never call `ENV_LOCK.init()`, so it is UB to attempt to
+// acquire this mutex reentrantly!
+static ENV_LOCK: Mutex = Mutex::new();
+
+
+extern {
+    #[cfg(not(target_os = "dragonfly"))]
+    #[cfg_attr(any(target_os = "linux",
+                   target_os = "emscripten",
+                   target_os = "fuchsia",
+                   target_os = "l4re"),
+               link_name = "__errno_location")]
+    #[cfg_attr(any(target_os = "bitrig",
+                   target_os = "netbsd",
+                   target_os = "openbsd",
+                   target_os = "android",
+                   target_os = "hermit",
+                   target_env = "newlib"),
+               link_name = "__errno")]
+    #[cfg_attr(target_os = "solaris", link_name = "___errno")]
+    #[cfg_attr(any(target_os = "macos",
+                   target_os = "ios",
+                   target_os = "freebsd"),
+               link_name = "__error")]
+    #[cfg_attr(target_os = "haiku", link_name = "_errnop")]
+    fn errno_location() -> *mut c_int;
+}
 
 /// Returns the platform-specific value of errno
+#[cfg(not(target_os = "dragonfly"))]
 pub fn errno() -> i32 {
-    extern {
-        #[cfg_attr(any(target_os = "linux", target_os = "android"), link_name = "__errno_location")]
-        #[cfg_attr(any(target_os = "bitrig", target_os = "netbsd", target_os = "openbsd",
-                       target_env = "newlib"),
-                   link_name = "__errno")]
-        #[cfg_attr(target_os = "dragonfly", link_name = "__dfly_error")]
-        #[cfg_attr(any(target_os = "macos", target_os = "ios", target_os = "freebsd"),
-                   link_name = "__error")]
-        fn errno_location() -> *const c_int;
-    }
-
     unsafe {
         (*errno_location()) as i32
     }
+}
+
+/// Sets the platform-specific value of errno
+#[cfg(any(target_os = "solaris", target_os = "fuchsia"))] // only needed for readdir so far
+pub fn set_errno(e: i32) {
+    unsafe {
+        *errno_location() = e as c_int
+    }
+}
+
+#[cfg(target_os = "dragonfly")]
+pub fn errno() -> i32 {
+    extern {
+        #[thread_local]
+        static errno: c_int;
+    }
+
+    unsafe { errno as i32 }
 }
 
 /// Gets a detailed string description for the given error number.
@@ -65,7 +100,7 @@ pub fn error_string(errno: i32) -> String {
 
     let p = buf.as_mut_ptr();
     unsafe {
-        if strerror_r(errno as c_int, p, buf.len() as libc::size_t) < 0 {
+        if strerror_r(errno as c_int, p, buf.len()) < 0 {
             panic!("strerror_r failure");
         }
 
@@ -79,7 +114,7 @@ pub fn getcwd() -> io::Result<PathBuf> {
     loop {
         unsafe {
             let ptr = buf.as_mut_ptr() as *mut libc::c_char;
-            if !libc::getcwd(ptr, buf.capacity() as libc::size_t).is_null() {
+            if !libc::getcwd(ptr, buf.capacity()).is_null() {
                 let len = CStr::from_ptr(buf.as_ptr() as *const libc::c_char).to_bytes().len();
                 buf.set_len(len);
                 buf.shrink_to_fit();
@@ -102,7 +137,7 @@ pub fn getcwd() -> io::Result<PathBuf> {
 
 pub fn chdir(p: &path::Path) -> io::Result<()> {
     let p: &OsStr = p.as_ref();
-    let p = try!(CString::new(p.as_bytes()));
+    let p = CString::new(p.as_bytes())?;
     unsafe {
         match libc::chdir(p.as_ptr()) == (0 as c_int) {
             true => Ok(()),
@@ -149,7 +184,7 @@ pub fn join_paths<I, T>(paths: I) -> Result<OsString, JoinPathsError>
         if path.contains(&sep) {
             return Err(JoinPathsError)
         }
-        joined.push_all(path);
+        joined.extend_from_slice(path);
     }
     Ok(OsStringExt::from_vec(joined))
 }
@@ -164,65 +199,99 @@ impl StdError for JoinPathsError {
     fn description(&self) -> &str { "failed to join paths" }
 }
 
-#[cfg(target_os = "freebsd")]
+#[cfg(any(target_os = "freebsd", target_os = "dragonfly"))]
 pub fn current_exe() -> io::Result<PathBuf> {
     unsafe {
         let mut mib = [libc::CTL_KERN as c_int,
                        libc::KERN_PROC as c_int,
                        libc::KERN_PROC_PATHNAME as c_int,
                        -1 as c_int];
-        let mut sz: libc::size_t = 0;
-        let err = libc::sysctl(mib.as_mut_ptr(), mib.len() as ::libc::c_uint,
-                               ptr::null_mut(), &mut sz, ptr::null_mut(),
-                               0 as libc::size_t);
-        if err != 0 { return Err(io::Error::last_os_error()); }
-        if sz == 0 { return Err(io::Error::last_os_error()); }
-        let mut v: Vec<u8> = Vec::with_capacity(sz as usize);
-        let err = libc::sysctl(mib.as_mut_ptr(), mib.len() as ::libc::c_uint,
-                               v.as_mut_ptr() as *mut libc::c_void, &mut sz,
-                               ptr::null_mut(), 0 as libc::size_t);
-        if err != 0 { return Err(io::Error::last_os_error()); }
-        if sz == 0 { return Err(io::Error::last_os_error()); }
-        v.set_len(sz as usize - 1); // chop off trailing NUL
+        let mut sz = 0;
+        cvt(libc::sysctl(mib.as_mut_ptr(), mib.len() as ::libc::c_uint,
+                         ptr::null_mut(), &mut sz, ptr::null_mut(), 0))?;
+        if sz == 0 {
+            return Err(io::Error::last_os_error())
+        }
+        let mut v: Vec<u8> = Vec::with_capacity(sz);
+        cvt(libc::sysctl(mib.as_mut_ptr(), mib.len() as ::libc::c_uint,
+                         v.as_mut_ptr() as *mut libc::c_void, &mut sz,
+                         ptr::null_mut(), 0))?;
+        if sz == 0 {
+            return Err(io::Error::last_os_error());
+        }
+        v.set_len(sz - 1); // chop off trailing NUL
         Ok(PathBuf::from(OsString::from_vec(v)))
     }
 }
 
-#[cfg(target_os = "dragonfly")]
-pub fn current_exe() -> io::Result<PathBuf> {
-    ::fs::read_link("/proc/curproc/file")
-}
-
 #[cfg(target_os = "netbsd")]
 pub fn current_exe() -> io::Result<PathBuf> {
-    ::fs::read_link("/proc/curproc/exe")
+    fn sysctl() -> io::Result<PathBuf> {
+        unsafe {
+            let mib = [libc::CTL_KERN, libc::KERN_PROC_ARGS, -1, libc::KERN_PROC_PATHNAME];
+            let mut path_len: usize = 0;
+            cvt(libc::sysctl(mib.as_ptr(), mib.len() as ::libc::c_uint,
+                             ptr::null_mut(), &mut path_len,
+                             ptr::null(), 0))?;
+            if path_len <= 1 {
+                return Err(io::Error::new(io::ErrorKind::Other,
+                           "KERN_PROC_PATHNAME sysctl returned zero-length string"))
+            }
+            let mut path: Vec<u8> = Vec::with_capacity(path_len);
+            cvt(libc::sysctl(mib.as_ptr(), mib.len() as ::libc::c_uint,
+                             path.as_ptr() as *mut libc::c_void, &mut path_len,
+                             ptr::null(), 0))?;
+            path.set_len(path_len - 1); // chop off NUL
+            Ok(PathBuf::from(OsString::from_vec(path)))
+        }
+    }
+    fn procfs() -> io::Result<PathBuf> {
+        let curproc_exe = path::Path::new("/proc/curproc/exe");
+        if curproc_exe.is_file() {
+            return ::fs::read_link(curproc_exe);
+        }
+        Err(io::Error::new(io::ErrorKind::Other,
+                           "/proc/curproc/exe doesn't point to regular file."))
+    }
+    sysctl().or_else(|_| procfs())
 }
 
 #[cfg(any(target_os = "bitrig", target_os = "openbsd"))]
 pub fn current_exe() -> io::Result<PathBuf> {
-    use sync::StaticMutex;
-    static LOCK: StaticMutex = StaticMutex::new();
-
-    extern {
-        fn rust_current_exe() -> *const c_char;
-    }
-
-    let _guard = LOCK.lock();
-
     unsafe {
-        let v = rust_current_exe();
-        if v.is_null() {
-            Err(io::Error::last_os_error())
+        let mut mib = [libc::CTL_KERN,
+                       libc::KERN_PROC_ARGS,
+                       libc::getpid(),
+                       libc::KERN_PROC_ARGV];
+        let mib = mib.as_mut_ptr();
+        let mut argv_len = 0;
+        cvt(libc::sysctl(mib, 4, ptr::null_mut(), &mut argv_len,
+                         ptr::null_mut(), 0))?;
+        let mut argv = Vec::<*const libc::c_char>::with_capacity(argv_len as usize);
+        cvt(libc::sysctl(mib, 4, argv.as_mut_ptr() as *mut _,
+                         &mut argv_len, ptr::null_mut(), 0))?;
+        argv.set_len(argv_len as usize);
+        if argv[0].is_null() {
+            return Err(io::Error::new(io::ErrorKind::Other,
+                                      "no current exe available"))
+        }
+        let argv0 = CStr::from_ptr(argv[0]).to_bytes();
+        if argv0[0] == b'.' || argv0.iter().any(|b| *b == b'/') {
+            ::fs::canonicalize(OsStr::from_bytes(argv0))
         } else {
-            let vec = CStr::from_ptr(v).to_bytes().to_vec();
-            Ok(PathBuf::from(OsString::from_vec(vec)))
+            Ok(PathBuf::from(OsStr::from_bytes(argv0)))
         }
     }
 }
 
-#[cfg(any(target_os = "linux", target_os = "android"))]
+#[cfg(any(target_os = "linux", target_os = "android", target_os = "emscripten"))]
 pub fn current_exe() -> io::Result<PathBuf> {
-    ::fs::read_link("/proc/self/exe")
+    let selfexe = PathBuf::from("/proc/self/exe");
+    if selfexe.exists() {
+        ::fs::read_link(selfexe)
+    } else {
+        Err(io::Error::new(io::ErrorKind::Other, "no /proc/self/exe available. Is /proc mounted?"))
+    }
 }
 
 #[cfg(any(target_os = "macos", target_os = "ios"))]
@@ -243,121 +312,82 @@ pub fn current_exe() -> io::Result<PathBuf> {
     }
 }
 
-pub struct Args {
-    iter: vec::IntoIter<OsString>,
-    _dont_send_or_sync_me: *mut (),
-}
-
-impl Iterator for Args {
-    type Item = OsString;
-    fn next(&mut self) -> Option<OsString> { self.iter.next() }
-    fn size_hint(&self) -> (usize, Option<usize>) { self.iter.size_hint() }
-}
-
-impl ExactSizeIterator for Args {
-    fn len(&self) -> usize { self.iter.len() }
-}
-
-/// Returns the command line arguments
-///
-/// Returns a list of the command line arguments.
-#[cfg(target_os = "macos")]
-pub fn args() -> Args {
+#[cfg(any(target_os = "solaris"))]
+pub fn current_exe() -> io::Result<PathBuf> {
     extern {
-        // These functions are in crt_externs.h.
-        fn _NSGetArgc() -> *mut c_int;
-        fn _NSGetArgv() -> *mut *mut *mut c_char;
+        fn getexecname() -> *const c_char;
     }
-
-    let vec = unsafe {
-        let (argc, argv) = (*_NSGetArgc() as isize,
-                            *_NSGetArgv() as *const *const c_char);
-        (0.. argc as isize).map(|i| {
-            let bytes = CStr::from_ptr(*argv.offset(i)).to_bytes().to_vec();
-            OsStringExt::from_vec(bytes)
-        }).collect::<Vec<_>>()
-    };
-    Args {
-        iter: vec.into_iter(),
-        _dont_send_or_sync_me: ptr::null_mut(),
-    }
-}
-
-// As _NSGetArgc and _NSGetArgv aren't mentioned in iOS docs
-// and use underscores in their names - they're most probably
-// are considered private and therefore should be avoided
-// Here is another way to get arguments using Objective C
-// runtime
-//
-// In general it looks like:
-// res = Vec::new()
-// let args = [[NSProcessInfo processInfo] arguments]
-// for i in (0..[args count])
-//      res.push([args objectAtIndex:i])
-// res
-#[cfg(target_os = "ios")]
-pub fn args() -> Args {
-    use mem;
-
-    #[link(name = "objc")]
-    extern {
-        fn sel_registerName(name: *const libc::c_uchar) -> Sel;
-        fn objc_msgSend(obj: NsId, sel: Sel, ...) -> NsId;
-        fn objc_getClass(class_name: *const libc::c_uchar) -> NsId;
-    }
-
-    #[link(name = "Foundation", kind = "framework")]
-    extern {}
-
-    type Sel = *const libc::c_void;
-    type NsId = *const libc::c_void;
-
-    let mut res = Vec::new();
-
     unsafe {
-        let process_info_sel = sel_registerName("processInfo\0".as_ptr());
-        let arguments_sel = sel_registerName("arguments\0".as_ptr());
-        let utf8_sel = sel_registerName("UTF8String\0".as_ptr());
-        let count_sel = sel_registerName("count\0".as_ptr());
-        let object_at_sel = sel_registerName("objectAtIndex:\0".as_ptr());
+        let path = getexecname();
+        if path.is_null() {
+            Err(io::Error::last_os_error())
+        } else {
+            let filename = CStr::from_ptr(path).to_bytes();
+            let path = PathBuf::from(<OsStr as OsStrExt>::from_bytes(filename));
 
-        let klass = objc_getClass("NSProcessInfo\0".as_ptr());
-        let info = objc_msgSend(klass, process_info_sel);
-        let args = objc_msgSend(info, arguments_sel);
-
-        let cnt: usize = mem::transmute(objc_msgSend(args, count_sel));
-        for i in 0..cnt {
-            let tmp = objc_msgSend(args, object_at_sel, i);
-            let utf_c_str: *const libc::c_char =
-                mem::transmute(objc_msgSend(tmp, utf8_sel));
-            let bytes = CStr::from_ptr(utf_c_str).to_bytes();
-            res.push(OsString::from(str::from_utf8(bytes).unwrap()))
+            // Prepend a current working directory to the path if
+            // it doesn't contain an absolute pathname.
+            if filename[0] == b'/' {
+                Ok(path)
+            } else {
+                getcwd().map(|cwd| cwd.join(path))
+            }
         }
     }
-
-    Args { iter: res.into_iter(), _dont_send_or_sync_me: ptr::null_mut() }
 }
 
-#[cfg(any(target_os = "linux",
-          target_os = "android",
-          target_os = "freebsd",
-          target_os = "dragonfly",
-          target_os = "bitrig",
-          target_os = "netbsd",
-          target_os = "openbsd",
-          target_os = "nacl"))]
-pub fn args() -> Args {
-    use sys_common;
-    let bytes = sys_common::args::clone().unwrap_or(Vec::new());
-    let v: Vec<OsString> = bytes.into_iter().map(|v| {
-        OsStringExt::from_vec(v)
-    }).collect();
-    Args { iter: v.into_iter(), _dont_send_or_sync_me: ptr::null_mut() }
+#[cfg(target_os = "haiku")]
+pub fn current_exe() -> io::Result<PathBuf> {
+    // Use Haiku's image info functions
+    #[repr(C)]
+    struct image_info {
+        id: i32,
+        type_: i32,
+        sequence: i32,
+        init_order: i32,
+        init_routine: *mut libc::c_void,    // function pointer
+        term_routine: *mut libc::c_void,    // function pointer
+        device: libc::dev_t,
+        node: libc::ino_t,
+        name: [libc::c_char; 1024],         // MAXPATHLEN
+        text: *mut libc::c_void,
+        data: *mut libc::c_void,
+        text_size: i32,
+        data_size: i32,
+        api_version: i32,
+        abi: i32,
+    }
+
+    unsafe {
+        extern {
+            fn _get_next_image_info(team_id: i32, cookie: *mut i32,
+                info: *mut image_info, size: i32) -> i32;
+        }
+
+        let mut info: image_info = mem::zeroed();
+        let mut cookie: i32 = 0;
+        // the executable can be found at team id 0
+        let result = _get_next_image_info(0, &mut cookie, &mut info,
+            mem::size_of::<image_info>() as i32);
+        if result != 0 {
+            use io::ErrorKind;
+            Err(io::Error::new(ErrorKind::Other, "Error getting executable path"))
+        } else {
+            let name = CStr::from_ptr(info.name.as_ptr()).to_bytes();
+            Ok(PathBuf::from(OsStr::from_bytes(name)))
+        }
+    }
+}
+
+#[cfg(any(target_os = "fuchsia", target_os = "l4re", target_os = "hermit"))]
+pub fn current_exe() -> io::Result<PathBuf> {
+    use io::ErrorKind;
+    Err(io::Error::new(ErrorKind::Other, "Not yet implemented!"))
 }
 
 pub struct Env {
     iter: vec::IntoIter<(OsString, OsString)>,
-    _dont_send_or_sync_me: *mut (),
+    _dont_send_or_sync_me: PhantomData<*mut ()>,
 }
 
 impl Iterator for Env {
@@ -381,22 +411,21 @@ pub unsafe fn environ() -> *mut *const *const c_char {
 /// Returns a vector of (variable, value) byte-vector pairs for all the
 /// environment variables of the current process.
 pub fn env() -> Env {
-    let _g = ENV_LOCK.lock();
-    return unsafe {
+    unsafe {
+        let _guard = ENV_LOCK.lock();
         let mut environ = *environ();
-        if environ == ptr::null() {
-            panic!("os::env() failure getting env string from OS: {}",
-                   io::Error::last_os_error());
-        }
         let mut result = Vec::new();
-        while *environ != ptr::null() {
+        while environ != ptr::null() && *environ != ptr::null() {
             if let Some(key_value) = parse(CStr::from_ptr(*environ).to_bytes()) {
                 result.push(key_value);
             }
             environ = environ.offset(1);
         }
-        Env { iter: result.into_iter(), _dont_send_or_sync_me: ptr::null_mut() }
-    };
+        return Env {
+            iter: result.into_iter(),
+            _dont_send_or_sync_me: PhantomData,
+        }
+    }
 
     fn parse(input: &[u8]) -> Option<(OsString, OsString)> {
         // Strategy (copied from glibc): Variable name and value are separated
@@ -406,7 +435,7 @@ pub fn env() -> Env {
         if input.is_empty() {
             return None;
         }
-        let pos = input[1..].iter().position(|&b| b == b'=').map(|p| p + 1);
+        let pos = memchr::memchr(b'=', &input[1..]).map(|p| p + 1);
         pos.map(|p| (
             OsStringExt::from_vec(input[..p].to_vec()),
             OsStringExt::from_vec(input[p+1..].to_vec()),
@@ -417,33 +446,36 @@ pub fn env() -> Env {
 pub fn getenv(k: &OsStr) -> io::Result<Option<OsString>> {
     // environment variables with a nul byte can't be set, so their value is
     // always None as well
-    let k = try!(CString::new(k.as_bytes()));
-    let _g = ENV_LOCK.lock();
-    Ok(unsafe {
-        let s = libc::getenv(k.as_ptr()) as *const _;
-        if s.is_null() {
+    let k = CString::new(k.as_bytes())?;
+    unsafe {
+        let _guard = ENV_LOCK.lock();
+        let s = libc::getenv(k.as_ptr()) as *const libc::c_char;
+        let ret = if s.is_null() {
             None
         } else {
             Some(OsStringExt::from_vec(CStr::from_ptr(s).to_bytes().to_vec()))
-        }
-    })
+        };
+        Ok(ret)
+    }
 }
 
 pub fn setenv(k: &OsStr, v: &OsStr) -> io::Result<()> {
-    let k = try!(CString::new(k.as_bytes()));
-    let v = try!(CString::new(v.as_bytes()));
-    let _g = ENV_LOCK.lock();
-    cvt(unsafe {
-        libc::setenv(k.as_ptr(), v.as_ptr(), 1)
-    }).map(|_| ())
+    let k = CString::new(k.as_bytes())?;
+    let v = CString::new(v.as_bytes())?;
+
+    unsafe {
+        let _guard = ENV_LOCK.lock();
+        cvt(libc::setenv(k.as_ptr(), v.as_ptr(), 1)).map(|_| ())
+    }
 }
 
 pub fn unsetenv(n: &OsStr) -> io::Result<()> {
-    let nbuf = try!(CString::new(n.as_bytes()));
-    let _g = ENV_LOCK.lock();
-    cvt(unsafe {
-        libc::unsetenv(nbuf.as_ptr())
-    }).map(|_| ())
+    let nbuf = CString::new(n.as_bytes())?;
+
+    unsafe {
+        let _guard = ENV_LOCK.lock();
+        cvt(libc::unsetenv(nbuf.as_ptr())).map(|_| ())
+    }
 }
 
 pub fn page_size() -> usize {
@@ -469,34 +501,71 @@ pub fn home_dir() -> Option<PathBuf> {
 
     #[cfg(any(target_os = "android",
               target_os = "ios",
-              target_os = "nacl"))]
+              target_os = "emscripten"))]
     unsafe fn fallback() -> Option<OsString> { None }
     #[cfg(not(any(target_os = "android",
                   target_os = "ios",
-                  target_os = "nacl")))]
+                  target_os = "emscripten")))]
     unsafe fn fallback() -> Option<OsString> {
         let amt = match libc::sysconf(libc::_SC_GETPW_R_SIZE_MAX) {
             n if n < 0 => 512 as usize,
             n => n as usize,
         };
-        let me = libc::getuid();
-        loop {
-            let mut buf = Vec::with_capacity(amt);
-            let mut passwd: libc::passwd = mem::zeroed();
-            let mut result = ptr::null_mut();
-            match libc::getpwuid_r(me, &mut passwd, buf.as_mut_ptr(),
-                                   buf.capacity() as libc::size_t,
-                                   &mut result) {
-                0 if !result.is_null() => {}
-                _ => return None
-            }
-            let ptr = passwd.pw_dir as *const _;
-            let bytes = CStr::from_ptr(ptr).to_bytes().to_vec();
-            return Some(OsStringExt::from_vec(bytes))
+        let mut buf = Vec::with_capacity(amt);
+        let mut passwd: libc::passwd = mem::zeroed();
+        let mut result = ptr::null_mut();
+        match libc::getpwuid_r(libc::getuid(), &mut passwd, buf.as_mut_ptr(),
+                               buf.capacity(), &mut result) {
+            0 if !result.is_null() => {
+                let ptr = passwd.pw_dir as *const _;
+                let bytes = CStr::from_ptr(ptr).to_bytes().to_vec();
+                Some(OsStringExt::from_vec(bytes))
+            },
+            _ => None,
         }
     }
 }
 
 pub fn exit(code: i32) -> ! {
     unsafe { libc::exit(code as c_int) }
+}
+
+pub fn getpid() -> u32 {
+    unsafe { libc::getpid() as u32 }
+}
+
+pub fn getppid() -> u32 {
+    unsafe { libc::getppid() as u32 }
+}
+
+#[cfg(target_env = "gnu")]
+pub fn glibc_version() -> Option<(usize, usize)> {
+    if let Some(Ok(version_str)) = glibc_version_cstr().map(CStr::to_str) {
+        parse_glibc_version(version_str)
+    } else {
+        None
+    }
+}
+
+#[cfg(target_env = "gnu")]
+fn glibc_version_cstr() -> Option<&'static CStr> {
+    weak! {
+        fn gnu_get_libc_version() -> *const libc::c_char
+    }
+    if let Some(f) = gnu_get_libc_version.get() {
+        unsafe { Some(CStr::from_ptr(f())) }
+    } else {
+        None
+    }
+}
+
+// Returns Some((major, minor)) if the string is a valid "x.y" version,
+// ignoring any extra dot-separated parts. Otherwise return None.
+#[cfg(target_env = "gnu")]
+fn parse_glibc_version(version: &str) -> Option<(usize, usize)> {
+    let mut parsed_ints = version.split('.').map(str::parse::<usize>).fuse();
+    match (parsed_ints.next(), parsed_ints.next()) {
+        (Some(Ok(major)), Some(Ok(minor))) => Some((major, minor)),
+        _ => None
+    }
 }

@@ -11,21 +11,23 @@
 //! Rust AST Visitor. Extracts useful information and massages it into a form
 //! usable for clean
 
-use std::collections::HashSet;
 use std::mem;
 
-use syntax::abi;
 use syntax::ast;
 use syntax::attr;
-use syntax::attr::AttrMetaMethods;
-use syntax::codemap::Span;
+use syntax::codemap::Spanned;
+use syntax_pos::{self, Span};
 
-use rustc::front::map as hir_map;
-use rustc::middle::stability;
+use rustc::hir::map as hir_map;
+use rustc::hir::def::Def;
+use rustc::hir::def_id::{DefId, LOCAL_CRATE};
+use rustc::middle::privacy::AccessLevel;
+use rustc::util::nodemap::{FxHashSet, FxHashMap};
 
-use rustc_front::hir;
+use rustc::hir;
 
 use core;
+use clean::{self, AttributesExt, NestedAttributesExt, def_id_to_path};
 use doctree::*;
 
 // looks to me like the first two of these are actually
@@ -36,37 +38,53 @@ use doctree::*;
 // also, is there some reason that this doesn't use the 'visit'
 // framework from syntax?
 
-pub struct RustdocVisitor<'a, 'tcx: 'a> {
+pub struct RustdocVisitor<'a, 'tcx: 'a, 'rcx: 'a, 'cstore: 'rcx> {
     pub module: Module,
-    pub attrs: Vec<ast::Attribute>,
-    pub cx: &'a core::DocContext<'a, 'tcx>,
-    pub analysis: Option<&'a core::CrateAnalysis>,
-    view_item_stack: HashSet<ast::NodeId>,
-    inlining_from_glob: bool,
+    pub attrs: hir::HirVec<ast::Attribute>,
+    pub cx: &'a core::DocContext<'a, 'tcx, 'rcx, 'cstore>,
+    view_item_stack: FxHashSet<ast::NodeId>,
+    inlining: bool,
+    /// Is the current module and all of its parents public?
+    inside_public_path: bool,
+    exact_paths: Option<FxHashMap<DefId, Vec<String>>>,
 }
 
-impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
-    pub fn new(cx: &'a core::DocContext<'a, 'tcx>,
-               analysis: Option<&'a core::CrateAnalysis>) -> RustdocVisitor<'a, 'tcx> {
-        // If the root is reexported, terminate all recursion.
-        let mut stack = HashSet::new();
+impl<'a, 'tcx, 'rcx, 'cstore> RustdocVisitor<'a, 'tcx, 'rcx, 'cstore> {
+    pub fn new(
+        cx: &'a core::DocContext<'a, 'tcx, 'rcx, 'cstore>
+    ) -> RustdocVisitor<'a, 'tcx, 'rcx, 'cstore> {
+        // If the root is re-exported, terminate all recursion.
+        let mut stack = FxHashSet();
         stack.insert(ast::CRATE_NODE_ID);
         RustdocVisitor {
             module: Module::new(None),
-            attrs: Vec::new(),
-            cx: cx,
-            analysis: analysis,
+            attrs: hir::HirVec::new(),
+            cx,
             view_item_stack: stack,
-            inlining_from_glob: false,
+            inlining: false,
+            inside_public_path: true,
+            exact_paths: Some(FxHashMap()),
+        }
+    }
+
+    fn store_path(&mut self, did: DefId) {
+        // We can't use the entry api, as that keeps the mutable borrow of self active
+        // when we try to use cx
+        let exact_paths = self.exact_paths.as_mut().unwrap();
+        if exact_paths.get(&did).is_none() {
+            let path = def_id_to_path(self.cx, did, self.cx.crate_name.clone());
+            exact_paths.insert(did, path);
         }
     }
 
     fn stability(&self, id: ast::NodeId) -> Option<attr::Stability> {
-        self.cx.tcx_opt().and_then(|tcx| {
-            self.cx.map.opt_local_def_id(id)
-                       .and_then(|def_id| stability::lookup(tcx, def_id))
-                       .cloned()
-        })
+        self.cx.tcx.hir.opt_local_def_id(id)
+            .and_then(|def_id| self.cx.tcx.lookup_stability(def_id)).cloned()
+    }
+
+    fn deprecation(&self, id: ast::NodeId) -> Option<attr::Deprecation> {
+        self.cx.tcx.hir.opt_local_def_id(id)
+            .and_then(|def_id| self.cx.tcx.lookup_deprecation(def_id))
     }
 
     pub fn visit(&mut self, krate: &hir::Crate) {
@@ -74,27 +92,51 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
 
         self.module = self.visit_mod_contents(krate.span,
                                               krate.attrs.clone(),
-                                              hir::Public,
+                                              Spanned { span: syntax_pos::DUMMY_SP,
+                                                        node: hir::VisibilityKind::Public },
                                               ast::CRATE_NODE_ID,
                                               &krate.module,
                                               None);
         // attach the crate's exported macros to the top-level module:
-        self.module.macros = krate.exported_macros.iter()
-            .map(|def| self.visit_macro(def)).collect();
+        let macro_exports: Vec<_> =
+            krate.exported_macros.iter().map(|def| self.visit_local_macro(def)).collect();
+        self.module.macros.extend(macro_exports);
         self.module.is_crate = true;
+
+        self.cx.renderinfo.borrow_mut().exact_paths = self.exact_paths.take().unwrap();
     }
 
     pub fn visit_variant_data(&mut self, item: &hir::Item,
-                            name: ast::Name, sd: &hir::VariantData,
-                            generics: &hir::Generics) -> Struct {
+                              name: ast::Name, sd: &hir::VariantData,
+                              generics: &hir::Generics) -> Struct {
         debug!("Visiting struct");
         let struct_type = struct_type_from_def(&*sd);
         Struct {
             id: item.id,
-            struct_type: struct_type,
-            name: name,
-            vis: item.vis,
+            struct_type,
+            name,
+            vis: item.vis.clone(),
             stab: self.stability(item.id),
+            depr: self.deprecation(item.id),
+            attrs: item.attrs.clone(),
+            generics: generics.clone(),
+            fields: sd.fields().iter().cloned().collect(),
+            whence: item.span
+        }
+    }
+
+    pub fn visit_union_data(&mut self, item: &hir::Item,
+                            name: ast::Name, sd: &hir::VariantData,
+                            generics: &hir::Generics) -> Union {
+        debug!("Visiting union");
+        let struct_type = struct_type_from_def(&*sd);
+        Union {
+            id: item.id,
+            struct_type,
+            name,
+            vis: item.vis.clone(),
+            stab: self.stability(item.id),
+            depr: self.deprecation(item.id),
             attrs: item.attrs.clone(),
             generics: generics.clone(),
             fields: sd.fields().iter().cloned().collect(),
@@ -107,16 +149,18 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
                           params: &hir::Generics) -> Enum {
         debug!("Visiting enum");
         Enum {
-            name: name,
+            name,
             variants: def.variants.iter().map(|v| Variant {
                 name: v.node.name,
                 attrs: v.node.attrs.clone(),
                 stab: self.stability(v.node.data.id()),
+                depr: self.deprecation(v.node.data.id()),
                 def: v.node.data.clone(),
                 whence: v.span,
             }).collect(),
-            vis: it.vis,
+            vis: it.vis.clone(),
             stab: self.stability(it.id),
+            depr: self.deprecation(it.id),
             generics: params.clone(),
             attrs: it.attrs.clone(),
             id: it.id,
@@ -126,27 +170,26 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
 
     pub fn visit_fn(&mut self, item: &hir::Item,
                     name: ast::Name, fd: &hir::FnDecl,
-                    unsafety: &hir::Unsafety,
-                    constness: hir::Constness,
-                    abi: &abi::Abi,
-                    gen: &hir::Generics) -> Function {
+                    header: hir::FnHeader,
+                    gen: &hir::Generics,
+                    body: hir::BodyId) -> Function {
         debug!("Visiting fn");
         Function {
             id: item.id,
-            vis: item.vis,
+            vis: item.vis.clone(),
             stab: self.stability(item.id),
+            depr: self.deprecation(item.id),
             attrs: item.attrs.clone(),
             decl: fd.clone(),
-            name: name,
+            name,
             whence: item.span,
             generics: gen.clone(),
-            unsafety: *unsafety,
-            constness: constness,
-            abi: *abi,
+            header,
+            body,
         }
     }
 
-    pub fn visit_mod_contents(&mut self, span: Span, attrs: Vec<ast::Attribute> ,
+    pub fn visit_mod_contents(&mut self, span: Span, attrs: hir::HirVec<ast::Attribute>,
                               vis: hir::Visibility, id: ast::NodeId,
                               m: &hir::Mod,
                               name: Option<ast::Name>) -> Module {
@@ -154,263 +197,362 @@ impl<'a, 'tcx> RustdocVisitor<'a, 'tcx> {
         om.where_outer = span;
         om.where_inner = m.inner;
         om.attrs = attrs;
-        om.vis = vis;
+        om.vis = vis.clone();
         om.stab = self.stability(id);
+        om.depr = self.deprecation(id);
         om.id = id;
+        // Keep track of if there were any private modules in the path.
+        let orig_inside_public_path = self.inside_public_path;
+        self.inside_public_path &= vis.node.is_pub();
         for i in &m.item_ids {
-            let item = self.cx.map.expect_item(i.id);
+            let item = self.cx.tcx.hir.expect_item(i.id);
             self.visit_item(item, None, &mut om);
         }
+        self.inside_public_path = orig_inside_public_path;
         om
     }
 
-    fn visit_view_path(&mut self, path: hir::ViewPath_,
-                       om: &mut Module,
-                       id: ast::NodeId,
-                       please_inline: bool) -> Option<hir::ViewPath_> {
-        match path {
-            hir::ViewPathSimple(dst, base) => {
-                if self.resolve_id(id, Some(dst), false, om, please_inline) {
-                    None
-                } else {
-                    Some(hir::ViewPathSimple(dst, base))
-                }
-            }
-            hir::ViewPathList(p, paths) => {
-                let mine = paths.into_iter().filter(|path| {
-                    !self.resolve_id(path.node.id(), None, false, om,
-                                     please_inline)
-                }).collect::<Vec<hir::PathListItem>>();
+    /// Tries to resolve the target of a `pub use` statement and inlines the
+    /// target if it is defined locally and would not be documented otherwise,
+    /// or when it is specifically requested with `please_inline`.
+    /// (the latter is the case when the import is marked `doc(inline)`)
+    ///
+    /// Cross-crate inlining occurs later on during crate cleaning
+    /// and follows different rules.
+    ///
+    /// Returns true if the target has been inlined.
+    fn maybe_inline_local(&mut self,
+                          id: ast::NodeId,
+                          def: Def,
+                          renamed: Option<ast::Name>,
+                          glob: bool,
+                          om: &mut Module,
+                          please_inline: bool) -> bool {
 
-                if mine.is_empty() {
-                    None
-                } else {
-                    Some(hir::ViewPathList(p, mine))
+        fn inherits_doc_hidden(cx: &core::DocContext, mut node: ast::NodeId) -> bool {
+            while let Some(id) = cx.tcx.hir.get_enclosing_scope(node) {
+                node = id;
+                if cx.tcx.hir.attrs(node).lists("doc").has_word("hidden") {
+                    return true;
+                }
+                if node == ast::CRATE_NODE_ID {
+                    break;
                 }
             }
-
-            // these are feature gated anyway
-            hir::ViewPathGlob(base) => {
-                if self.resolve_id(id, None, true, om, please_inline) {
-                    None
-                } else {
-                    Some(hir::ViewPathGlob(base))
-                }
-            }
+            false
         }
 
-    }
+        debug!("maybe_inline_local def: {:?}", def);
 
-    fn resolve_id(&mut self, id: ast::NodeId, renamed: Option<ast::Name>,
-                  glob: bool, om: &mut Module, please_inline: bool) -> bool {
-        let tcx = match self.cx.tcx_opt() {
-            Some(tcx) => tcx,
-            None => return false
-        };
-        let def = tcx.def_map.borrow()[&id].def_id();
-        let def_node_id = match tcx.map.as_local_node_id(def) {
-            Some(n) => n, None => return false
-        };
-        let analysis = match self.analysis {
-            Some(analysis) => analysis, None => return false
-        };
-        if !please_inline && analysis.access_levels.is_public(def) {
+        let tcx = self.cx.tcx;
+        if def == Def::Err {
+            return false;
+        }
+        let def_did = def.def_id();
+
+        let use_attrs = tcx.hir.attrs(id);
+        // Don't inline doc(hidden) imports so they can be stripped at a later stage.
+        let is_no_inline = use_attrs.lists("doc").has_word("no_inline") ||
+                           use_attrs.lists("doc").has_word("hidden");
+
+        // For cross-crate impl inlining we need to know whether items are
+        // reachable in documentation - a previously nonreachable item can be
+        // made reachable by cross-crate inlining which we're checking here.
+        // (this is done here because we need to know this upfront)
+        if !def_did.is_local() && !is_no_inline {
+            let attrs = clean::inline::load_attrs(self.cx, def_did);
+            let self_is_hidden = attrs.lists("doc").has_word("hidden");
+            match def {
+                Def::Trait(did) |
+                Def::Struct(did) |
+                Def::Union(did) |
+                Def::Enum(did) |
+                Def::TyForeign(did) |
+                Def::TyAlias(did) if !self_is_hidden => {
+                    self.cx.access_levels.borrow_mut().map.insert(did, AccessLevel::Public);
+                },
+                Def::Mod(did) => if !self_is_hidden {
+                    ::visit_lib::LibEmbargoVisitor::new(self.cx).visit_mod(did);
+                },
+                _ => {},
+            }
+
             return false
         }
+
+        let def_node_id = match tcx.hir.as_local_node_id(def_did) {
+            Some(n) => n, None => return false
+        };
+
+        let is_private = !self.cx.access_levels.borrow().is_public(def_did);
+        let is_hidden = inherits_doc_hidden(self.cx, def_node_id);
+
+        // Only inline if requested or if the item would otherwise be stripped
+        if (!please_inline && !is_private && !is_hidden) || is_no_inline {
+            return false
+        }
+
         if !self.view_item_stack.insert(def_node_id) { return false }
 
-        let ret = match tcx.map.get(def_node_id) {
-            hir_map::NodeItem(it) => {
-                if glob {
-                    let prev = mem::replace(&mut self.inlining_from_glob, true);
-                    match it.node {
-                        hir::ItemMod(ref m) => {
-                            for i in &m.item_ids {
-                                let i = self.cx.map.expect_item(i.id);
-                                self.visit_item(i, None, om);
-                            }
-                        }
-                        hir::ItemEnum(..) => {}
-                        _ => { panic!("glob not mapped to a module or enum"); }
-                    }
-                    self.inlining_from_glob = prev;
-                } else {
-                    self.visit_item(it, renamed, om);
+        let ret = match tcx.hir.get(def_node_id) {
+            hir_map::NodeItem(&hir::Item { node: hir::ItemKind::Mod(ref m), .. }) if glob => {
+                let prev = mem::replace(&mut self.inlining, true);
+                for i in &m.item_ids {
+                    let i = self.cx.tcx.hir.expect_item(i.id);
+                    self.visit_item(i, None, om);
                 }
+                self.inlining = prev;
+                true
+            }
+            hir_map::NodeItem(it) if !glob => {
+                let prev = mem::replace(&mut self.inlining, true);
+                self.visit_item(it, renamed, om);
+                self.inlining = prev;
+                true
+            }
+            hir_map::NodeForeignItem(it) if !glob => {
+                // generate a fresh `extern {}` block if we want to inline a foreign item.
+                om.foreigns.push(hir::ForeignMod {
+                    abi: tcx.hir.get_foreign_abi(it.id),
+                    items: vec![hir::ForeignItem {
+                        name: renamed.unwrap_or(it.name),
+                        .. it.clone()
+                    }].into(),
+                });
                 true
             }
             _ => false,
         };
         self.view_item_stack.remove(&def_node_id);
-        return ret;
+        ret
     }
 
     pub fn visit_item(&mut self, item: &hir::Item,
                       renamed: Option<ast::Name>, om: &mut Module) {
         debug!("Visiting item {:?}", item);
         let name = renamed.unwrap_or(item.name);
+
+        if item.vis.node.is_pub() {
+            let def_id = self.cx.tcx.hir.local_def_id(item.id);
+            self.store_path(def_id);
+        }
+
         match item.node {
-            hir::ItemExternCrate(ref p) => {
-                let path = match *p {
-                    None => None,
-                    Some(x) => Some(x.to_string()),
-                };
+            hir::ItemKind::ForeignMod(ref fm) => {
+                // If inlining we only want to include public functions.
+                om.foreigns.push(if self.inlining {
+                    hir::ForeignMod {
+                        abi: fm.abi,
+                        items: fm.items.iter().filter(|i| i.vis.node.is_pub()).cloned().collect(),
+                    }
+                } else {
+                    fm.clone()
+                });
+            }
+            // If we're inlining, skip private items.
+            _ if self.inlining && !item.vis.node.is_pub() => {}
+            hir::ItemKind::GlobalAsm(..) => {}
+            hir::ItemKind::ExternCrate(orig_name) => {
+                let def_id = self.cx.tcx.hir.local_def_id(item.id);
                 om.extern_crates.push(ExternCrate {
-                    name: name,
-                    path: path,
-                    vis: item.vis,
+                    cnum: self.cx.tcx.extern_mod_stmt_cnum(def_id)
+                                .unwrap_or(LOCAL_CRATE),
+                    name,
+                    path: orig_name.map(|x|x.to_string()),
+                    vis: item.vis.clone(),
                     attrs: item.attrs.clone(),
                     whence: item.span,
                 })
             }
-            hir::ItemUse(ref vpath) => {
-                let node = vpath.node.clone();
-                let node = if item.vis == hir::Public {
+            hir::ItemKind::Use(_, hir::UseKind::ListStem) => {}
+            hir::ItemKind::Use(ref path, kind) => {
+                let is_glob = kind == hir::UseKind::Glob;
+
+                // struct and variant constructors always show up alongside their definitions, we've
+                // already processed them so just discard these.
+                match path.def {
+                    Def::StructCtor(..) | Def::VariantCtor(..) => return,
+                    _ => {}
+                }
+
+                // If there was a private module in the current path then don't bother inlining
+                // anything as it will probably be stripped anyway.
+                if item.vis.node.is_pub() && self.inside_public_path {
                     let please_inline = item.attrs.iter().any(|item| {
                         match item.meta_item_list() {
-                            Some(list) => {
-                                list.iter().any(|i| &i.name()[..] == "inline")
+                            Some(ref list) if item.check_name("doc") => {
+                                list.iter().any(|i| i.check_name("inline"))
                             }
-                            None => false,
+                            _ => false,
                         }
                     });
-                    match self.visit_view_path(node, om, item.id, please_inline) {
-                        None => return,
-                        Some(p) => p
+                    let name = if is_glob { None } else { Some(name) };
+                    if self.maybe_inline_local(item.id,
+                                               path.def,
+                                               name,
+                                               is_glob,
+                                               om,
+                                               please_inline) {
+                        return;
                     }
-                } else {
-                    node
-                };
+                }
+
                 om.imports.push(Import {
+                    name,
                     id: item.id,
-                    vis: item.vis,
+                    vis: item.vis.clone(),
                     attrs: item.attrs.clone(),
-                    node: node,
+                    path: (**path).clone(),
+                    glob: is_glob,
                     whence: item.span,
                 });
             }
-            hir::ItemMod(ref m) => {
+            hir::ItemKind::Mod(ref m) => {
                 om.mods.push(self.visit_mod_contents(item.span,
                                                      item.attrs.clone(),
-                                                     item.vis,
+                                                     item.vis.clone(),
                                                      item.id,
                                                      m,
                                                      Some(name)));
             },
-            hir::ItemEnum(ref ed, ref gen) =>
+            hir::ItemKind::Enum(ref ed, ref gen) =>
                 om.enums.push(self.visit_enum_def(item, name, ed, gen)),
-            hir::ItemStruct(ref sd, ref gen) =>
+            hir::ItemKind::Struct(ref sd, ref gen) =>
                 om.structs.push(self.visit_variant_data(item, name, sd, gen)),
-            hir::ItemFn(ref fd, ref unsafety, constness, ref abi, ref gen, _) =>
-                om.fns.push(self.visit_fn(item, name, &**fd, unsafety,
-                                          constness, abi, gen)),
-            hir::ItemTy(ref ty, ref gen) => {
+            hir::ItemKind::Union(ref sd, ref gen) =>
+                om.unions.push(self.visit_union_data(item, name, sd, gen)),
+            hir::ItemKind::Fn(ref fd, header, ref gen, body) =>
+                om.fns.push(self.visit_fn(item, name, &**fd, header, gen, body)),
+            hir::ItemKind::Ty(ref ty, ref gen) => {
                 let t = Typedef {
                     ty: ty.clone(),
                     gen: gen.clone(),
-                    name: name,
+                    name,
                     id: item.id,
                     attrs: item.attrs.clone(),
                     whence: item.span,
-                    vis: item.vis,
+                    vis: item.vis.clone(),
                     stab: self.stability(item.id),
+                    depr: self.deprecation(item.id),
                 };
                 om.typedefs.push(t);
             },
-            hir::ItemStatic(ref ty, ref mut_, ref exp) => {
+            hir::ItemKind::Existential(ref exist_ty) => {
+                let t = Existential {
+                    exist_ty: exist_ty.clone(),
+                    name,
+                    id: item.id,
+                    attrs: item.attrs.clone(),
+                    whence: item.span,
+                    vis: item.vis.clone(),
+                    stab: self.stability(item.id),
+                    depr: self.deprecation(item.id),
+                };
+                om.existentials.push(t);
+            },
+            hir::ItemKind::Static(ref ty, ref mut_, ref exp) => {
                 let s = Static {
                     type_: ty.clone(),
                     mutability: mut_.clone(),
                     expr: exp.clone(),
                     id: item.id,
-                    name: name,
+                    name,
                     attrs: item.attrs.clone(),
                     whence: item.span,
-                    vis: item.vis,
+                    vis: item.vis.clone(),
                     stab: self.stability(item.id),
+                    depr: self.deprecation(item.id),
                 };
                 om.statics.push(s);
             },
-            hir::ItemConst(ref ty, ref exp) => {
+            hir::ItemKind::Const(ref ty, ref exp) => {
                 let s = Constant {
                     type_: ty.clone(),
                     expr: exp.clone(),
                     id: item.id,
-                    name: name,
+                    name,
                     attrs: item.attrs.clone(),
                     whence: item.span,
-                    vis: item.vis,
+                    vis: item.vis.clone(),
                     stab: self.stability(item.id),
+                    depr: self.deprecation(item.id),
                 };
                 om.constants.push(s);
             },
-            hir::ItemTrait(unsafety, ref gen, ref b, ref items) => {
+            hir::ItemKind::Trait(is_auto, unsafety, ref gen, ref b, ref item_ids) => {
+                let items = item_ids.iter()
+                                    .map(|ti| self.cx.tcx.hir.trait_item(ti.id).clone())
+                                    .collect();
                 let t = Trait {
-                    unsafety: unsafety,
-                    name: name,
-                    items: items.clone(),
+                    is_auto,
+                    unsafety,
+                    name,
+                    items,
                     generics: gen.clone(),
                     bounds: b.iter().cloned().collect(),
                     id: item.id,
                     attrs: item.attrs.clone(),
                     whence: item.span,
-                    vis: item.vis,
+                    vis: item.vis.clone(),
                     stab: self.stability(item.id),
+                    depr: self.deprecation(item.id),
                 };
                 om.traits.push(t);
             },
-            hir::ItemImpl(unsafety, polarity, ref gen, ref tr, ref ty, ref items) => {
-                let i = Impl {
-                    unsafety: unsafety,
-                    polarity: polarity,
-                    generics: gen.clone(),
-                    trait_: tr.clone(),
-                    for_: ty.clone(),
-                    items: items.clone(),
-                    attrs: item.attrs.clone(),
-                    id: item.id,
-                    whence: item.span,
-                    vis: item.vis,
-                    stab: self.stability(item.id),
-                };
-                // Don't duplicate impls when inlining glob imports, we'll pick
-                // them up regardless of where they're located.
-                if !self.inlining_from_glob {
+            hir::ItemKind::TraitAlias(..) => {
+                unimplemented!("trait objects are not yet implemented")
+            },
+
+            hir::ItemKind::Impl(unsafety,
+                          polarity,
+                          defaultness,
+                          ref gen,
+                          ref tr,
+                          ref ty,
+                          ref item_ids) => {
+                // Don't duplicate impls when inlining, we'll pick them up
+                // regardless of where they're located.
+                if !self.inlining {
+                    let items = item_ids.iter()
+                                        .map(|ii| self.cx.tcx.hir.impl_item(ii.id).clone())
+                                        .collect();
+                    let i = Impl {
+                        unsafety,
+                        polarity,
+                        defaultness,
+                        generics: gen.clone(),
+                        trait_: tr.clone(),
+                        for_: ty.clone(),
+                        items,
+                        attrs: item.attrs.clone(),
+                        id: item.id,
+                        whence: item.span,
+                        vis: item.vis.clone(),
+                        stab: self.stability(item.id),
+                        depr: self.deprecation(item.id),
+                    };
                     om.impls.push(i);
                 }
             },
-            hir::ItemDefaultImpl(unsafety, ref trait_ref) => {
-                let i = DefaultImpl {
-                    unsafety: unsafety,
-                    trait_: trait_ref.clone(),
-                    id: item.id,
-                    attrs: item.attrs.clone(),
-                    whence: item.span,
-                };
-                // see comment above about ItemImpl
-                if !self.inlining_from_glob {
-                    om.def_traits.push(i);
-                }
-            }
-            hir::ItemForeignMod(ref fm) => {
-                om.foreigns.push(fm.clone());
-            }
         }
     }
 
     // convert each exported_macro into a doc item
-    fn visit_macro(&self, def: &hir::MacroDef) -> Macro {
+    fn visit_local_macro(&self, def: &hir::MacroDef) -> Macro {
+        debug!("visit_local_macro: {}", def.name);
+        let tts = def.body.trees().collect::<Vec<_>>();
         // Extract the spans of all matchers. They represent the "interface" of the macro.
-        let matchers = def.body.chunks(4).map(|arm| arm[0].get_span()).collect();
+        let matchers = tts.chunks(4).map(|arm| arm[0].span()).collect();
 
         Macro {
-            id: def.id,
+            def_id: self.cx.tcx.hir.local_def_id(def.id),
             attrs: def.attrs.clone(),
             name: def.name,
             whence: def.span,
-            matchers: matchers,
+            matchers,
             stab: self.stability(def.id),
-            imported_from: def.imported_from,
+            depr: self.deprecation(def.id),
+            imported_from: None,
         }
     }
 }

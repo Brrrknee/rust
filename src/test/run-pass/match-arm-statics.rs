@@ -8,19 +8,26 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// compile-flags: -g
 
+#[derive(PartialEq, Eq)]
 struct NewBool(bool);
 
+#[derive(PartialEq, Eq)]
 enum Direction {
     North,
     East,
     South,
     West
 }
+
+#[derive(PartialEq, Eq)]
 struct Foo {
     bar: Option<Direction>,
     baz: NewBool
 }
+
+#[derive(PartialEq, Eq)]
 enum EnumWithStructVariants {
     Variant1(bool),
     Variant2 {
@@ -37,7 +44,7 @@ const VARIANT2_NORTH: EnumWithStructVariants = EnumWithStructVariants::Variant2 
     dir: Direction::North };
 
 pub mod glfw {
-    #[derive(Copy, Clone)]
+    #[derive(Copy, Clone, PartialEq, Eq)]
     pub struct InputState(usize);
 
     pub const RELEASE  : InputState = InputState(0);
@@ -82,13 +89,22 @@ fn issue_14576() {
         _ => unreachable!()
     }
 
+    #[derive(PartialEq, Eq)]
     enum C { D = 3, E = 4 }
     const F : C = C::D;
 
     assert_eq!(match C::D { F => 1, _ => 2, }, 1);
+
+    // test gaps
+    #[derive(PartialEq, Eq)]
+    enum G { H = 3, I = 5 }
+    const K : G = G::I;
+
+    assert_eq!(match G::I { K => 1, _ => 2, }, 1);
 }
 
 fn issue_13731() {
+    #[derive(PartialEq, Eq)]
     enum A { AA(()) }
     const B: A = A::AA(());
 
@@ -99,6 +115,7 @@ fn issue_13731() {
 
 fn issue_15393() {
     #![allow(dead_code)]
+    #[derive(PartialEq, Eq)]
     struct Flags {
         bits: usize
     }

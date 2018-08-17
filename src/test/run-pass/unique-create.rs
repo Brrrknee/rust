@@ -10,7 +10,6 @@
 
 // pretty-expanded FIXME #23616
 
-#![allow(unknown_features)]
 #![feature(box_syntax)]
 
 pub fn main() {
@@ -18,5 +17,5 @@ pub fn main() {
 }
 
 fn vec() {
-    vec!(0);
+    vec![0];
 }

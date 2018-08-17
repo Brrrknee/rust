@@ -8,11 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-
-#![allow(unknown_features)]
 #![feature(box_syntax)]
-
-use std::{option, mem};
 
 // Iota-reduction is a rule in the Calculus of (Co-)Inductive Constructions,
 // which "says that a destructor applied to an object built from a constructor
@@ -43,9 +39,9 @@ macro_rules! check_option {
         check_option!($e, $T, |ptr| assert_eq!(*ptr, $e));
     }};
     ($e:expr, $T:ty, |$v:ident| $chk:expr) => {{
-        assert!(option::Option::None::<$T>.is_none());
+        assert!(None::<$T>.is_none());
         let e = $e;
-        let s_ = option::Option::Some::<$T>(e);
+        let s_ = Some::<$T>(e);
         let $v = s_.as_ref().unwrap();
         $chk
     }}
@@ -78,9 +74,8 @@ pub fn main() {
     check_type!(&17, &isize);
     check_type!(box 18, Box<isize>);
     check_type!("foo".to_string(), String);
-    check_type!(vec!(20, 22), Vec<isize> );
-    let mint: usize = unsafe { mem::transmute(main) };
+    check_type!(vec![20, 22], Vec<isize>);
     check_type!(main, fn(), |pthing| {
-        assert_eq!(mint, unsafe { mem::transmute(*pthing) })
+        assert_eq!(main as fn(), *pthing as fn())
     });
 }

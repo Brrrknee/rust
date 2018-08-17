@@ -10,55 +10,203 @@
 
 #![allow(non_camel_case_types)]
 
+use rustc_data_structures::sync::Lock;
+
 use std::cell::{RefCell, Cell};
 use std::collections::HashMap;
-use std::collections::hash_state::HashState;
-use std::ffi::CString;
 use std::fmt::Debug;
-use std::hash::Hash;
-use std::iter::repeat;
-use std::path::Path;
-use std::time::Duration;
+use std::hash::{Hash, BuildHasher};
+use std::panic;
+use std::env;
+use std::time::{Duration, Instant};
 
-use rustc_front::hir;
-use rustc_front::intravisit;
-use rustc_front::intravisit::Visitor;
+use std::sync::mpsc::{Sender};
+use syntax_pos::{SpanData};
+use ty::TyCtxt;
+use dep_graph::{DepNode};
+use proc_macro;
+use lazy_static;
+use session::Session;
 
 // The name of the associated type for `Fn` return types
 pub const FN_OUTPUT_NAME: &'static str = "Output";
 
 // Useful type to use with `Result<>` indicate that an error has already
 // been reported to the user, so no need to continue checking.
-#[derive(Clone, Copy, Debug)]
+#[derive(Clone, Copy, Debug, RustcEncodable, RustcDecodable)]
 pub struct ErrorReported;
 
-pub fn time<T, F>(do_it: bool, what: &str, f: F) -> T where
+thread_local!(static TIME_DEPTH: Cell<usize> = Cell::new(0));
+
+lazy_static! {
+    static ref DEFAULT_HOOK: Box<dyn Fn(&panic::PanicInfo) + Sync + Send + 'static> = {
+        let hook = panic::take_hook();
+        panic::set_hook(Box::new(panic_hook));
+        hook
+    };
+}
+
+fn panic_hook(info: &panic::PanicInfo) {
+    if !proc_macro::__internal::in_sess() {
+        (*DEFAULT_HOOK)(info);
+
+        let backtrace = env::var_os("RUST_BACKTRACE").map(|x| &x != "0").unwrap_or(false);
+
+        if backtrace {
+            TyCtxt::try_print_query_stack();
+        }
+
+        #[cfg(windows)]
+        unsafe {
+            if env::var("RUSTC_BREAK_ON_ICE").is_ok() {
+                extern "system" {
+                    fn DebugBreak();
+                }
+                // Trigger a debugger if we crashed during bootstrap
+                DebugBreak();
+            }
+        }
+    }
+}
+
+pub fn install_panic_hook() {
+    lazy_static::initialize(&DEFAULT_HOOK);
+}
+
+/// Parameters to the `Dump` variant of type `ProfileQueriesMsg`.
+#[derive(Clone,Debug)]
+pub struct ProfQDumpParams {
+    /// A base path for the files we will dump
+    pub path:String,
+    /// To ensure that the compiler waits for us to finish our dumps
+    pub ack:Sender<()>,
+    /// toggle dumping a log file with every `ProfileQueriesMsg`
+    pub dump_profq_msg_log:bool,
+}
+
+#[allow(bad_style)]
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct QueryMsg {
+    pub query: &'static str,
+    pub msg: Option<String>,
+}
+
+/// A sequence of these messages induce a trace of query-based incremental compilation.
+/// FIXME(matthewhammer): Determine whether we should include cycle detection here or not.
+#[derive(Clone,Debug)]
+pub enum ProfileQueriesMsg {
+    /// begin a timed pass
+    TimeBegin(String),
+    /// end a timed pass
+    TimeEnd,
+    /// begin a task (see dep_graph::graph::with_task)
+    TaskBegin(DepNode),
+    /// end a task
+    TaskEnd,
+    /// begin a new query
+    /// can't use `Span` because queries are sent to other thread
+    QueryBegin(SpanData, QueryMsg),
+    /// query is satisfied by using an already-known value for the given key
+    CacheHit,
+    /// query requires running a provider; providers may nest, permitting queries to nest.
+    ProviderBegin,
+    /// query is satisfied by a provider terminating with a value
+    ProviderEnd,
+    /// dump a record of the queries to the given path
+    Dump(ProfQDumpParams),
+    /// halt the profiling/monitoring background thread
+    Halt
+}
+
+/// If enabled, send a message to the profile-queries thread
+pub fn profq_msg(sess: &Session, msg: ProfileQueriesMsg) {
+    if let Some(s) = sess.profile_channel.borrow().as_ref() {
+        s.send(msg).unwrap()
+    } else {
+        // Do nothing
+    }
+}
+
+/// Set channel for profile queries channel
+pub fn profq_set_chan(sess: &Session, s: Sender<ProfileQueriesMsg>) -> bool {
+    let mut channel = sess.profile_channel.borrow_mut();
+    if channel.is_none() {
+        *channel = Some(s);
+        true
+    } else {
+        false
+    }
+}
+
+/// Read the current depth of `time()` calls. This is used to
+/// encourage indentation across threads.
+pub fn time_depth() -> usize {
+    TIME_DEPTH.with(|slot| slot.get())
+}
+
+/// Set the current depth of `time()` calls. The idea is to call
+/// `set_time_depth()` with the result from `time_depth()` in the
+/// parent thread.
+pub fn set_time_depth(depth: usize) {
+    TIME_DEPTH.with(|slot| slot.set(depth));
+}
+
+pub fn time<T, F>(sess: &Session, what: &str, f: F) -> T where
     F: FnOnce() -> T,
 {
-    thread_local!(static DEPTH: Cell<usize> = Cell::new(0));
+    time_ext(sess.time_passes(), Some(sess), what, f)
+}
+
+pub fn time_ext<T, F>(do_it: bool, sess: Option<&Session>, what: &str, f: F) -> T where
+    F: FnOnce() -> T,
+{
     if !do_it { return f(); }
 
-    let old = DEPTH.with(|slot| {
+    let old = TIME_DEPTH.with(|slot| {
         let r = slot.get();
         slot.set(r + 1);
         r
     });
 
-    let mut rv = None;
-    let dur = {
-        let ref mut rvp = rv;
+    if let Some(sess) = sess {
+        if cfg!(debug_assertions) {
+            profq_msg(sess, ProfileQueriesMsg::TimeBegin(what.to_string()))
+        }
+    }
+    let start = Instant::now();
+    let rv = f();
+    let dur = start.elapsed();
+    if let Some(sess) = sess {
+        if cfg!(debug_assertions) {
+            profq_msg(sess, ProfileQueriesMsg::TimeEnd)
+        }
+    }
 
-        Duration::span(move || {
-            *rvp = Some(f())
-        })
-    };
-    let rv = rv.unwrap();
+    print_time_passes_entry_internal(what, dur);
 
-    // Hack up our own formatting for the duration to make it easier for scripts
-    // to parse (always use the same number of decimal places and the same unit).
-    const NANOS_PER_SEC: f64 = 1_000_000_000.0;
-    let secs = dur.as_secs() as f64;
-    let secs = secs + dur.subsec_nanos() as f64 / NANOS_PER_SEC;
+    TIME_DEPTH.with(|slot| slot.set(old));
+
+    rv
+}
+
+pub fn print_time_passes_entry(do_it: bool, what: &str, dur: Duration) {
+    if !do_it {
+        return
+    }
+
+    let old = TIME_DEPTH.with(|slot| {
+        let r = slot.get();
+        slot.set(r + 1);
+        r
+    });
+
+    print_time_passes_entry_internal(what, dur);
+
+    TIME_DEPTH.with(|slot| slot.set(old));
+}
+
+fn print_time_passes_entry_internal(what: &str, dur: Duration) {
+    let indentation = TIME_DEPTH.with(|slot| slot.get());
 
     let mem_string = match get_resident() {
         Some(n) => {
@@ -67,43 +215,76 @@ pub fn time<T, F>(do_it: bool, what: &str, f: F) -> T where
         }
         None => "".to_owned(),
     };
-    println!("{}time: {:.3}{}\t{}", repeat("  ").take(old).collect::<String>(),
-             secs, mem_string, what);
-
-    DEPTH.with(|slot| slot.set(old));
-
-    rv
+    println!("{}time: {}{}\t{}",
+             "  ".repeat(indentation),
+             duration_to_secs_str(dur),
+             mem_string,
+             what);
 }
 
-// Like std::macros::try!, but for Option<>.
-macro_rules! option_try(
-    ($e:expr) => (match $e { Some(e) => e, None => return None })
-);
+// Hack up our own formatting for the duration to make it easier for scripts
+// to parse (always use the same number of decimal places and the same unit).
+pub fn duration_to_secs_str(dur: Duration) -> String {
+    const NANOS_PER_SEC: f64 = 1_000_000_000.0;
+    let secs = dur.as_secs() as f64 +
+               dur.subsec_nanos() as f64 / NANOS_PER_SEC;
+
+    format!("{:.3}", secs)
+}
+
+pub fn to_readable_str(mut val: usize) -> String {
+    let mut groups = vec![];
+    loop {
+        let group = val % 1000;
+
+        val /= 1000;
+
+        if val == 0 {
+            groups.push(group.to_string());
+            break;
+        } else {
+            groups.push(format!("{:03}", group));
+        }
+    }
+
+    groups.reverse();
+
+    groups.join("_")
+}
+
+pub fn record_time<T, F>(accu: &Lock<Duration>, f: F) -> T where
+    F: FnOnce() -> T,
+{
+    let start = Instant::now();
+    let rv = f();
+    let duration = start.elapsed();
+    let mut accu = accu.lock();
+    *accu = *accu + duration;
+    rv
+}
 
 // Memory reporting
 #[cfg(unix)]
 fn get_resident() -> Option<usize> {
-    use std::fs::File;
-    use std::io::Read;
+    use std::fs;
 
     let field = 1;
-    let mut f = option_try!(File::open("/proc/self/statm").ok());
-    let mut contents = String::new();
-    option_try!(f.read_to_string(&mut contents).ok());
-    let s = option_try!(contents.split_whitespace().nth(field));
-    let npages = option_try!(s.parse::<usize>().ok());
+    let contents = fs::read("/proc/self/statm").ok()?;
+    let contents = String::from_utf8(contents).ok()?;
+    let s = contents.split_whitespace().nth(field)?;
+    let npages = s.parse::<usize>().ok()?;
     Some(npages * 4096)
 }
 
 #[cfg(windows)]
-#[cfg_attr(stage0, allow(improper_ctypes))]
 fn get_resident() -> Option<usize> {
     type BOOL = i32;
     type DWORD = u32;
     type HANDLE = *mut u8;
     use libc::size_t;
     use std::mem;
-    #[repr(C)] #[allow(non_snake_case)]
+    #[repr(C)]
+    #[allow(non_snake_case)]
     struct PROCESS_MEMORY_COUNTERS {
         cb: DWORD,
         PageFaultCount: DWORD,
@@ -145,7 +326,7 @@ pub fn indent<R, F>(op: F) -> R where
 }
 
 pub struct Indenter {
-    _cannot_construct_outside_of_this_module: ()
+    _cannot_construct_outside_of_this_module: (),
 }
 
 impl Drop for Indenter {
@@ -157,109 +338,51 @@ pub fn indenter() -> Indenter {
     Indenter { _cannot_construct_outside_of_this_module: () }
 }
 
-struct LoopQueryVisitor<P> where P: FnMut(&hir::Expr_) -> bool {
-    p: P,
-    flag: bool,
+pub trait MemoizationMap {
+    type Key: Clone;
+    type Value: Clone;
+
+    /// If `key` is present in the map, return the value,
+    /// otherwise invoke `op` and store the value in the map.
+    ///
+    /// NB: if the receiver is a `DepTrackingMap`, special care is
+    /// needed in the `op` to ensure that the correct edges are
+    /// added into the dep graph. See the `DepTrackingMap` impl for
+    /// more details!
+    fn memoize<OP>(&self, key: Self::Key, op: OP) -> Self::Value
+        where OP: FnOnce() -> Self::Value;
 }
 
-impl<'v, P> Visitor<'v> for LoopQueryVisitor<P> where P: FnMut(&hir::Expr_) -> bool {
-    fn visit_expr(&mut self, e: &hir::Expr) {
-        self.flag |= (self.p)(&e.node);
-        match e.node {
-          // Skip inner loops, since a break in the inner loop isn't a
-          // break inside the outer loop
-          hir::ExprLoop(..) | hir::ExprWhile(..) => {}
-          _ => intravisit::walk_expr(self, e)
-        }
-    }
-}
-
-// Takes a predicate p, returns true iff p is true for any subexpressions
-// of b -- skipping any inner loops (loop, while, loop_body)
-pub fn loop_query<P>(b: &hir::Block, p: P) -> bool where P: FnMut(&hir::Expr_) -> bool {
-    let mut v = LoopQueryVisitor {
-        p: p,
-        flag: false,
-    };
-    intravisit::walk_block(&mut v, b);
-    return v.flag;
-}
-
-struct BlockQueryVisitor<P> where P: FnMut(&hir::Expr) -> bool {
-    p: P,
-    flag: bool,
-}
-
-impl<'v, P> Visitor<'v> for BlockQueryVisitor<P> where P: FnMut(&hir::Expr) -> bool {
-    fn visit_expr(&mut self, e: &hir::Expr) {
-        self.flag |= (self.p)(e);
-        intravisit::walk_expr(self, e)
-    }
-}
-
-// Takes a predicate p, returns true iff p is true for any subexpressions
-// of b -- skipping any inner loops (loop, while, loop_body)
-pub fn block_query<P>(b: &hir::Block, p: P) -> bool where P: FnMut(&hir::Expr) -> bool {
-    let mut v = BlockQueryVisitor {
-        p: p,
-        flag: false,
-    };
-    intravisit::walk_block(&mut v, &*b);
-    return v.flag;
-}
-
-/// Memoizes a one-argument closure using the given RefCell containing
-/// a type implementing MutableMap to serve as a cache.
-///
-/// In the future the signature of this function is expected to be:
-/// ```
-/// pub fn memoized<T: Clone, U: Clone, M: MutableMap<T, U>>(
-///    cache: &RefCell<M>,
-///    f: &|T| -> U
-/// ) -> impl |T| -> U {
-/// ```
-/// but currently it is not possible.
-///
-/// # Examples
-/// ```
-/// struct Context {
-///    cache: RefCell<HashMap<usize, usize>>
-/// }
-///
-/// fn factorial(ctxt: &Context, n: usize) -> usize {
-///     memoized(&ctxt.cache, n, |n| match n {
-///         0 | 1 => n,
-///         _ => factorial(ctxt, n - 2) + factorial(ctxt, n - 1)
-///     })
-/// }
-/// ```
-#[inline(always)]
-pub fn memoized<T, U, S, F>(cache: &RefCell<HashMap<T, U, S>>, arg: T, f: F) -> U
-    where T: Clone + Hash + Eq,
-          U: Clone,
-          S: HashState,
-          F: FnOnce(T) -> U,
+impl<K, V, S> MemoizationMap for RefCell<HashMap<K,V,S>>
+    where K: Hash+Eq+Clone, V: Clone, S: BuildHasher
 {
-    let key = arg.clone();
-    let result = cache.borrow().get(&key).cloned();
-    match result {
-        Some(result) => result,
-        None => {
-            let result = f(arg);
-            cache.borrow_mut().insert(key, result.clone());
-            result
+    type Key = K;
+    type Value = V;
+
+    fn memoize<OP>(&self, key: K, op: OP) -> V
+        where OP: FnOnce() -> V
+    {
+        let result = self.borrow().get(&key).cloned();
+        match result {
+            Some(result) => result,
+            None => {
+                let result = op();
+                self.borrow_mut().insert(key, result.clone());
+                result
+            }
         }
     }
 }
 
-#[cfg(unix)]
-pub fn path2cstr(p: &Path) -> CString {
-    use std::os::unix::prelude::*;
-    use std::ffi::OsStr;
-    let p: &OsStr = p.as_ref();
-    CString::new(p.as_bytes()).unwrap()
-}
-#[cfg(windows)]
-pub fn path2cstr(p: &Path) -> CString {
-    CString::new(p.to_str().unwrap()).unwrap()
+#[test]
+fn test_to_readable_str() {
+    assert_eq!("0", to_readable_str(0));
+    assert_eq!("1", to_readable_str(1));
+    assert_eq!("99", to_readable_str(99));
+    assert_eq!("999", to_readable_str(999));
+    assert_eq!("1_000", to_readable_str(1_000));
+    assert_eq!("1_001", to_readable_str(1_001));
+    assert_eq!("999_999", to_readable_str(999_999));
+    assert_eq!("1_000_000", to_readable_str(1_000_000));
+    assert_eq!("1_234_567", to_readable_str(1_234_567));
 }

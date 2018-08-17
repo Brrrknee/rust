@@ -13,10 +13,7 @@
 // pretty-expanded FIXME #23616
 
 #![allow(dead_assignment)]
-#![allow(unused_variable)]
-#![allow(unknown_features)]
-
-// FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
+#![allow(unused_variables)]
 
 // Should pass region checking.
 fn ok(f: Box<FnMut(&usize)>) {

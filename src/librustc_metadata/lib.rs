@@ -8,54 +8,59 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![cfg_attr(stage0, feature(custom_attribute))]
-#![crate_name = "rustc_metadata"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![cfg_attr(stage0, staged_api)]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
-      html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
-      html_root_url = "https://doc.rust-lang.org/nightly/")]
+       html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
+       html_root_url = "https://doc.rust-lang.org/nightly/")]
 
 #![feature(box_patterns)]
-#![feature(duration_span)]
-#![feature(enumset)]
+#![feature(libc)]
+#![feature(macro_at_most_once_rep)]
+#![cfg_attr(not(stage0), feature(nll))]
+#![feature(proc_macro_internals)]
+#![feature(proc_macro_quote)]
 #![feature(quote)]
-#![feature(staged_api)]
-#![feature(vec_push_all)]
 #![feature(rustc_diagnostic_macros)]
+#![feature(slice_sort_by_cached_key)]
+#![feature(specialization)]
 #![feature(rustc_private)]
 
-#[macro_use] extern crate log;
-#[macro_use] extern crate syntax;
-#[macro_use] #[no_link] extern crate rustc_bitflags;
+#![recursion_limit="256"]
 
-extern crate flate;
-extern crate rbml;
-extern crate serialize;
-
-extern crate rustc;
-extern crate rustc_back;
-extern crate rustc_front;
-extern crate rustc_llvm;
-
-pub use rustc::middle;
+extern crate libc;
+#[macro_use]
+extern crate log;
+#[macro_use]
+extern crate syntax;
+extern crate syntax_pos;
+extern crate flate2;
+extern crate serialize as rustc_serialize; // used by deriving
+extern crate rustc_errors as errors;
+extern crate syntax_ext;
+extern crate proc_macro;
+extern crate rustc_metadata_utils;
 
 #[macro_use]
-mod macros;
+extern crate rustc;
+extern crate rustc_target;
+#[macro_use]
+extern crate rustc_data_structures;
 
-pub mod diagnostics;
+mod diagnostics;
 
-pub mod astencode;
-pub mod common;
-pub mod tyencode;
-pub mod tydecode;
-pub mod encoder;
-pub mod decoder;
+mod index_builder;
+mod index;
+mod encoder;
+mod decoder;
+mod cstore_impl;
+mod isolated_encoder;
+mod schema;
+mod native_libs;
+mod link_args;
+mod foreign_modules;
+
 pub mod creader;
-pub mod csearch;
 pub mod cstore;
-pub mod index;
-pub mod loader;
-pub mod macro_import;
+pub mod dynamic_lib;
+pub mod locator;
+
+__build_diagnostic_array! { librustc_metadata, DIAGNOSTICS }

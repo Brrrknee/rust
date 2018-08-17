@@ -9,14 +9,12 @@
 // except according to those terms.
 
 // Test that param substitutions from the correct environment are
-// used when translating unboxed closure calls.
+// used when codegenning unboxed closure calls.
 
 // pretty-expanded FIXME #23616
 
-#![feature(unboxed_closures, core)]
-
 pub fn inside<F: Fn()>(c: F) {
-    c.call(());
+    c();
 }
 
 // Use different number of type parameters and closure type to trigger

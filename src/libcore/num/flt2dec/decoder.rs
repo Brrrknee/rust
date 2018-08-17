@@ -10,10 +10,9 @@
 
 //! Decodes a floating-point value into individual parts and error ranges.
 
-use prelude::v1::*;
-
 use {f32, f64};
-use num::{Float, FpCategory};
+use num::FpCategory;
+use num::dec2flt::rawfp::RawFloat;
 
 /// Decoded unsigned finite value, such that:
 ///
@@ -22,7 +21,7 @@ use num::{Float, FpCategory};
 /// - Any number from `(mant - minus) * 2^exp` to `(mant + plus) * 2^exp` will
 ///   round to the original value. The range is inclusive only when
 ///   `inclusive` is true.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub struct Decoded {
     /// The scaled mantissa.
     pub mant: u64,
@@ -39,7 +38,7 @@ pub struct Decoded {
 }
 
 /// Decoded unsigned value.
-#[derive(Copy, Clone, Debug, PartialEq)]
+#[derive(Copy, Clone, Debug, PartialEq, Eq)]
 pub enum FullDecoded {
     /// Not-a-number.
     Nan,
@@ -52,7 +51,7 @@ pub enum FullDecoded {
 }
 
 /// A floating point type which can be `decode`d.
-pub trait DecodableFloat: Float + Copy {
+pub trait DecodableFloat: RawFloat + Copy {
     /// The minimum positive normalized value.
     fn min_pos_norm_value() -> Self;
 }
@@ -78,8 +77,8 @@ pub fn decode<T: DecodableFloat>(v: T) -> (/*negative?*/ bool, FullDecoded) {
             // neighbors: (mant - 2, exp) -- (mant, exp) -- (mant + 2, exp)
             // Float::integer_decode always preserves the exponent,
             // so the mantissa is scaled for subnormals.
-            FullDecoded::Finite(Decoded { mant: mant, minus: 1, plus: 1,
-                                          exp: exp, inclusive: even })
+            FullDecoded::Finite(Decoded { mant, minus: 1, plus: 1,
+                                          exp, inclusive: even })
         }
         FpCategory::Normal => {
             let minnorm = <T as DecodableFloat>::min_pos_norm_value().integer_decode();

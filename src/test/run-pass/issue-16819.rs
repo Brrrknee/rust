@@ -8,9 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-//`#[cfg]` on struct field permits empty unusable struct
-
-#![feature(braced_empty_structs)]
+// `#[cfg]` on struct field permits empty unusable struct
 
 struct S {
     #[cfg(untrue)]

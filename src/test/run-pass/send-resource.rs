@@ -9,8 +9,7 @@
 // except according to those terms.
 
 // pretty-expanded FIXME #23616
-
-#![feature(std_misc)]
+// ignore-emscripten no threads support
 
 use std::thread;
 use std::sync::mpsc::channel;

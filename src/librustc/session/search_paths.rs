@@ -10,8 +10,7 @@
 
 use std::slice;
 use std::path::{Path, PathBuf};
-use session::early_error;
-use syntax::diagnostic;
+use session::{early_error, config};
 
 #[derive(Clone, Debug)]
 pub struct SearchPaths {
@@ -23,7 +22,7 @@ pub struct Iter<'a> {
     iter: slice::Iter<'a, (PathKind, PathBuf)>,
 }
 
-#[derive(Eq, PartialEq, Clone, Copy, Debug)]
+#[derive(Eq, PartialEq, Clone, Copy, Debug, PartialOrd, Ord, Hash)]
 pub enum PathKind {
     Native,
     Crate,
@@ -38,7 +37,7 @@ impl SearchPaths {
         SearchPaths { paths: Vec::new() }
     }
 
-    pub fn add_path(&mut self, path: &str, color: diagnostic::ColorConfig) {
+    pub fn add_path(&mut self, path: &str, output: config::ErrorOutputType) {
         let (kind, path) = if path.starts_with("native=") {
             (PathKind::Native, &path["native=".len()..])
         } else if path.starts_with("crate=") {
@@ -53,7 +52,7 @@ impl SearchPaths {
             (PathKind::All, path)
         };
         if path.is_empty() {
-            early_error(color, "empty search path given via `-L`");
+            early_error(output, "empty search path given via `-L`");
         }
         self.paths.push((kind, PathBuf::from(path)));
     }
@@ -78,5 +77,12 @@ impl<'a> Iterator for Iter<'a> {
                 None => return None,
             }
         }
+    }
+
+    fn size_hint(&self) -> (usize, Option<usize>) {
+        // This iterator will never return more elements than the base iterator;
+        // but it can ignore all the remaining elements.
+        let (_, upper) = self.iter.size_hint();
+        (0, upper)
     }
 }

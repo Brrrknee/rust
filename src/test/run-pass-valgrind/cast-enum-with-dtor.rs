@@ -8,8 +8,9 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
+// no-prefer-dynamic
+
 #![allow(dead_code)]
-#![feature(const_fn)]
 
 // check dtor calling order when casting enums.
 
@@ -41,5 +42,5 @@ fn main() {
         assert_eq!(e as u32, 2);
         assert_eq!(FLAG.load(Ordering::SeqCst), 0);
     }
-    assert_eq!(FLAG.load(Ordering::SeqCst), 1);
+    assert_eq!(FLAG.load(Ordering::SeqCst), 0);
 }

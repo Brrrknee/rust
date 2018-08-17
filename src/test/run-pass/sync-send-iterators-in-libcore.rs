@@ -13,12 +13,9 @@
 #![allow(warnings)]
 #![feature(iter_empty)]
 #![feature(iter_once)]
-#![feature(iter_unfold)]
-#![feature(range_inclusive)]
-#![feature(step_by)]
 #![feature(str_escape)]
 
-use std::iter::{empty, once, range_inclusive, repeat};
+use std::iter::{empty, once, repeat};
 
 fn is_sync<T>(_: T) where T: Sync {}
 fn is_send<T>(_: T) where T: Send {}
@@ -68,7 +65,7 @@ macro_rules! is_sync_send {
 
 fn main() {
     // for char.rs
-    all_sync_send!("Я", escape_default, escape_unicode);
+    all_sync_send!("Я", escape_debug, escape_default, escape_unicode);
 
     // for iter.rs
     all_sync_send_mutable_ref!([1], iter);
@@ -98,7 +95,6 @@ fn main() {
                    inspect(|_| ()));
 
     is_sync_send!((1..).step_by(2));
-    is_sync_send!(range_inclusive(1, 1));
     is_sync_send!((1..2).step_by(2));
     is_sync_send!((1..2));
     is_sync_send!((1..));

@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-
-#![allow(unknown_features)]
 #![feature(box_syntax)]
 
 struct X {
@@ -17,7 +15,7 @@ struct X {
 }
 
 trait Changer {
-    fn change(mut self: Box<Self>) -> Box<Self>;
+    fn change(self: Box<Self>) -> Box<Self>;
 }
 
 impl Changer for X {

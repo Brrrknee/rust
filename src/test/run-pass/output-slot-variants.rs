@@ -11,8 +11,7 @@
 // pretty-expanded FIXME #23616
 
 #![allow(dead_assignment)]
-#![allow(unused_variable)]
-#![allow(unknown_features)]
+#![allow(unused_variables)]
 #![feature(box_syntax)]
 
 struct A { a: isize, b: isize }

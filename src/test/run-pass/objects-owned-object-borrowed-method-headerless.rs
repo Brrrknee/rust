@@ -12,8 +12,6 @@
 // closed over do not contain managed values, and thus the boxes do
 // not have headers.
 
-
-#![allow(unknown_features)]
 #![feature(box_syntax)]
 
 
@@ -32,11 +30,11 @@ impl FooTrait for BarStruct {
 }
 
 pub fn main() {
-    let foos: Vec<Box<FooTrait>> = vec!(
+    let foos: Vec<Box<FooTrait>> = vec![
         box BarStruct{ x: 0 } as Box<FooTrait>,
         box BarStruct{ x: 1 } as Box<FooTrait>,
         box BarStruct{ x: 2 } as Box<FooTrait>
-    );
+    ];
 
     for i in 0..foos.len() {
         assert_eq!(i, foos[i].foo());

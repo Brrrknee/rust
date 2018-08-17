@@ -8,319 +8,351 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use attr::AttrMetaMethods;
-use diagnostic::SpanHandler;
-use feature_gate::GatedCfg;
-use fold::Folder;
-use {ast, fold, attr};
-use codemap::{Spanned, respan};
+use attr::HasAttrs;
+use feature_gate::{feature_err, EXPLAIN_STMT_ATTR_SYNTAX, Features, get_features, GateIssue};
+use {fold, attr};
+use ast;
+use codemap::Spanned;
+use edition::Edition;
+use parse::{token, ParseSess};
+use OneVector;
+
 use ptr::P;
 
-use util::small_vector::SmallVector;
-
-/// A folder that strips out items that do not belong in the current
-/// configuration.
-struct Context<F> where F: FnMut(&[ast::Attribute]) -> bool {
-    in_cfg: F,
+/// A folder that strips out items that do not belong in the current configuration.
+pub struct StripUnconfigured<'a> {
+    pub should_test: bool,
+    pub sess: &'a ParseSess,
+    pub features: Option<&'a Features>,
 }
 
-// Support conditional compilation by transforming the AST, stripping out
-// any items that do not belong in the current configuration
-pub fn strip_unconfigured_items(diagnostic: &SpanHandler, krate: ast::Crate,
-                                feature_gated_cfgs: &mut Vec<GatedCfg>)
-                                -> ast::Crate
-{
-    let krate = process_cfg_attr(diagnostic, krate, feature_gated_cfgs);
-    let config = krate.config.clone();
-    strip_items(krate, |attrs| in_cfg(diagnostic, &config, attrs, feature_gated_cfgs))
-}
-
-impl<F> fold::Folder for Context<F> where F: FnMut(&[ast::Attribute]) -> bool {
-    fn fold_mod(&mut self, module: ast::Mod) -> ast::Mod {
-        fold_mod(self, module)
-    }
-    fn fold_block(&mut self, block: P<ast::Block>) -> P<ast::Block> {
-        fold_block(self, block)
-    }
-    fn fold_foreign_mod(&mut self, foreign_mod: ast::ForeignMod) -> ast::ForeignMod {
-        fold_foreign_mod(self, foreign_mod)
-    }
-    fn fold_item_underscore(&mut self, item: ast::Item_) -> ast::Item_ {
-        fold_item_underscore(self, item)
-    }
-    fn fold_expr(&mut self, expr: P<ast::Expr>) -> P<ast::Expr> {
-        fold_expr(self, expr)
-    }
-    fn fold_mac(&mut self, mac: ast::Mac) -> ast::Mac {
-        fold::noop_fold_mac(mac, self)
-    }
-    fn fold_item(&mut self, item: P<ast::Item>) -> SmallVector<P<ast::Item>> {
-        fold_item(self, item)
-    }
-}
-
-pub fn strip_items<F>(krate: ast::Crate, in_cfg: F) -> ast::Crate where
-    F: FnMut(&[ast::Attribute]) -> bool,
-{
-    let mut ctxt = Context {
-        in_cfg: in_cfg,
-    };
-    ctxt.fold_crate(krate)
-}
-
-fn fold_mod<F>(cx: &mut Context<F>,
-               ast::Mod {inner, items}: ast::Mod)
-               -> ast::Mod where
-    F: FnMut(&[ast::Attribute]) -> bool
-{
-    ast::Mod {
-        inner: inner,
-        items: items.into_iter().flat_map(|a| {
-            cx.fold_item(a).into_iter()
-        }).collect()
-    }
-}
-
-fn filter_foreign_item<F>(cx: &mut Context<F>,
-                          item: P<ast::ForeignItem>)
-                          -> Option<P<ast::ForeignItem>> where
-    F: FnMut(&[ast::Attribute]) -> bool
-{
-    if foreign_item_in_cfg(cx, &item) {
-        Some(item)
-    } else {
-        None
-    }
-}
-
-fn fold_foreign_mod<F>(cx: &mut Context<F>,
-                       ast::ForeignMod {abi, items}: ast::ForeignMod)
-                       -> ast::ForeignMod where
-    F: FnMut(&[ast::Attribute]) -> bool
-{
-    ast::ForeignMod {
-        abi: abi,
-        items: items.into_iter()
-                    .filter_map(|a| filter_foreign_item(cx, a))
-                    .collect()
-    }
-}
-
-fn fold_item<F>(cx: &mut Context<F>, item: P<ast::Item>) -> SmallVector<P<ast::Item>> where
-    F: FnMut(&[ast::Attribute]) -> bool
-{
-    if item_in_cfg(cx, &item) {
-        SmallVector::one(item.map(|i| cx.fold_item_simple(i)))
-    } else {
-        SmallVector::zero()
-    }
-}
-
-fn fold_item_underscore<F>(cx: &mut Context<F>, item: ast::Item_) -> ast::Item_ where
-    F: FnMut(&[ast::Attribute]) -> bool
-{
-    let item = match item {
-        ast::ItemImpl(u, o, a, b, c, impl_items) => {
-            let impl_items = impl_items.into_iter()
-                                       .filter(|ii| (cx.in_cfg)(&ii.attrs))
-                                       .collect();
-            ast::ItemImpl(u, o, a, b, c, impl_items)
-        }
-        ast::ItemTrait(u, a, b, methods) => {
-            let methods = methods.into_iter()
-                                 .filter(|ti| (cx.in_cfg)(&ti.attrs))
-                                 .collect();
-            ast::ItemTrait(u, a, b, methods)
-        }
-        ast::ItemStruct(def, generics) => {
-            ast::ItemStruct(fold_struct(cx, def), generics)
-        }
-        ast::ItemEnum(def, generics) => {
-            let variants = def.variants.into_iter().filter_map(|v| {
-                if !(cx.in_cfg)(&v.node.attrs) {
-                    None
-                } else {
-                    Some(v.map(|Spanned {node: ast::Variant_ {name, attrs, data,
-                                                              disr_expr}, span}| {
-                        Spanned {
-                            node: ast::Variant_ {
-                                name: name,
-                                attrs: attrs,
-                                data: fold_struct(cx, data),
-                                disr_expr: disr_expr,
-                            },
-                            span: span
-                        }
-                    }))
-                }
-            });
-            ast::ItemEnum(ast::EnumDef {
-                variants: variants.collect(),
-            }, generics)
-        }
-        item => item,
-    };
-
-    fold::noop_fold_item_underscore(item, cx)
-}
-
-fn fold_struct<F>(cx: &mut Context<F>, vdata: ast::VariantData) -> ast::VariantData where
-    F: FnMut(&[ast::Attribute]) -> bool
-{
-    match vdata {
-        ast::VariantData::Struct(fields, id) => {
-            ast::VariantData::Struct(fields.into_iter().filter(|m| {
-                (cx.in_cfg)(&m.node.attrs)
-            }).collect(), id)
-        }
-        ast::VariantData::Tuple(fields, id) => {
-            ast::VariantData::Tuple(fields.into_iter().filter(|m| {
-                (cx.in_cfg)(&m.node.attrs)
-            }).collect(), id)
-        }
-        ast::VariantData::Unit(id) => ast::VariantData::Unit(id)
-    }
-}
-
-fn retain_stmt<F>(cx: &mut Context<F>, stmt: &ast::Stmt) -> bool where
-    F: FnMut(&[ast::Attribute]) -> bool
-{
-    match stmt.node {
-        ast::StmtDecl(ref decl, _) => {
-            match decl.node {
-                ast::DeclItem(ref item) => {
-                    item_in_cfg(cx, item)
-                }
-                _ => true
-            }
-        }
-        _ => true
-    }
-}
-
-fn fold_block<F>(cx: &mut Context<F>, b: P<ast::Block>) -> P<ast::Block> where
-    F: FnMut(&[ast::Attribute]) -> bool
-{
-    b.map(|ast::Block {id, stmts, expr, rules, span}| {
-        let resulting_stmts: Vec<P<ast::Stmt>> =
-            stmts.into_iter().filter(|a| retain_stmt(cx, a)).collect();
-        let resulting_stmts = resulting_stmts.into_iter()
-            .flat_map(|stmt| cx.fold_stmt(stmt).into_iter())
-            .collect();
-        ast::Block {
-            id: id,
-            stmts: resulting_stmts,
-            expr: expr.map(|x| cx.fold_expr(x)),
-            rules: rules,
-            span: span,
-        }
-    })
-}
-
-fn fold_expr<F>(cx: &mut Context<F>, expr: P<ast::Expr>) -> P<ast::Expr> where
-    F: FnMut(&[ast::Attribute]) -> bool
-{
-    expr.map(|ast::Expr {id, span, node}| {
-        fold::noop_fold_expr(ast::Expr {
-            id: id,
-            node: match node {
-                ast::ExprMatch(m, arms) => {
-                    ast::ExprMatch(m, arms.into_iter()
-                                        .filter(|a| (cx.in_cfg)(&a.attrs))
-                                        .collect())
-                }
-                _ => node
-            },
-            span: span
-        }, cx)
-    })
-}
-
-fn item_in_cfg<F>(cx: &mut Context<F>, item: &ast::Item) -> bool where
-    F: FnMut(&[ast::Attribute]) -> bool
-{
-    return (cx.in_cfg)(&item.attrs);
-}
-
-fn foreign_item_in_cfg<F>(cx: &mut Context<F>, item: &ast::ForeignItem) -> bool where
-    F: FnMut(&[ast::Attribute]) -> bool
-{
-    return (cx.in_cfg)(&item.attrs);
-}
-
-// Determine if an item should be translated in the current crate
-// configuration based on the item's attributes
-fn in_cfg(diagnostic: &SpanHandler, cfg: &[P<ast::MetaItem>], attrs: &[ast::Attribute],
-          feature_gated_cfgs: &mut Vec<GatedCfg>) -> bool {
-    attrs.iter().all(|attr| {
-        let mis = match attr.node.value.node {
-            ast::MetaList(_, ref mis) if attr.check_name("cfg") => mis,
-            _ => return true
+// `cfg_attr`-process the crate's attributes and compute the crate's features.
+pub fn features(mut krate: ast::Crate, sess: &ParseSess, should_test: bool, edition: Edition)
+                -> (ast::Crate, Features) {
+    let features;
+    {
+        let mut strip_unconfigured = StripUnconfigured {
+            should_test,
+            sess,
+            features: None,
         };
 
-        if mis.len() != 1 {
-            diagnostic.span_err(attr.span, "expected 1 cfg-pattern");
-            return true;
+        let unconfigured_attrs = krate.attrs.clone();
+        let err_count = sess.span_diagnostic.err_count();
+        if let Some(attrs) = strip_unconfigured.configure(krate.attrs) {
+            krate.attrs = attrs;
+        } else { // the entire crate is unconfigured
+            krate.attrs = Vec::new();
+            krate.module.items = Vec::new();
+            return (krate, Features::new());
         }
 
-        attr::cfg_matches(diagnostic, cfg, &mis[0],
-                          feature_gated_cfgs)
-    })
+        features = get_features(&sess.span_diagnostic, &krate.attrs, edition);
+
+        // Avoid reconfiguring malformed `cfg_attr`s
+        if err_count == sess.span_diagnostic.err_count() {
+            strip_unconfigured.features = Some(&features);
+            strip_unconfigured.configure(unconfigured_attrs);
+        }
+    }
+
+    (krate, features)
 }
 
-struct CfgAttrFolder<'a, 'b> {
-    diag: &'a SpanHandler,
-    config: ast::CrateConfig,
-    feature_gated_cfgs: &'b mut Vec<GatedCfg>
+macro_rules! configure {
+    ($this:ident, $node:ident) => {
+        match $this.configure($node) {
+            Some(node) => node,
+            None => return Default::default(),
+        }
+    }
 }
 
-// Process `#[cfg_attr]`.
-fn process_cfg_attr(diagnostic: &SpanHandler, krate: ast::Crate,
-                    feature_gated_cfgs: &mut Vec<GatedCfg>) -> ast::Crate {
-    let mut fld = CfgAttrFolder {
-        diag: diagnostic,
-        config: krate.config.clone(),
-        feature_gated_cfgs: feature_gated_cfgs,
-    };
-    fld.fold_crate(krate)
-}
+impl<'a> StripUnconfigured<'a> {
+    pub fn configure<T: HasAttrs>(&mut self, node: T) -> Option<T> {
+        let node = self.process_cfg_attrs(node);
+        if self.in_cfg(node.attrs()) { Some(node) } else { None }
+    }
 
-impl<'a,'b> fold::Folder for CfgAttrFolder<'a,'b> {
-    fn fold_attribute(&mut self, attr: ast::Attribute) -> Option<ast::Attribute> {
+    pub fn process_cfg_attrs<T: HasAttrs>(&mut self, node: T) -> T {
+        node.map_attrs(|attrs| {
+            attrs.into_iter().filter_map(|attr| self.process_cfg_attr(attr)).collect()
+        })
+    }
+
+    fn process_cfg_attr(&mut self, attr: ast::Attribute) -> Option<ast::Attribute> {
         if !attr.check_name("cfg_attr") {
-            return fold::noop_fold_attribute(attr, self);
+            return Some(attr);
         }
 
-        let attr_list = match attr.meta_item_list() {
-            Some(attr_list) => attr_list,
-            None => {
-                self.diag.span_err(attr.span, "expected `#[cfg_attr(<cfg pattern>, <attr>)]`");
-                return None;
-            }
-        };
-        let (cfg, mi) = match (attr_list.len(), attr_list.get(0), attr_list.get(1)) {
-            (2, Some(cfg), Some(mi)) => (cfg, mi),
-            _ => {
-                self.diag.span_err(attr.span, "expected `#[cfg_attr(<cfg pattern>, <attr>)]`");
+        let (cfg, path, tokens, span) = match attr.parse(self.sess, |parser| {
+            parser.expect(&token::OpenDelim(token::Paren))?;
+            let cfg = parser.parse_meta_item()?;
+            parser.expect(&token::Comma)?;
+            let lo = parser.span.lo();
+            let (path, tokens) = parser.parse_meta_item_unrestricted()?;
+            parser.expect(&token::CloseDelim(token::Paren))?;
+            Ok((cfg, path, tokens, parser.prev_span.with_lo(lo)))
+        }) {
+            Ok(result) => result,
+            Err(mut e) => {
+                e.emit();
                 return None;
             }
         };
 
-        if attr::cfg_matches(self.diag, &self.config[..], &cfg,
-                             self.feature_gated_cfgs) {
-            Some(respan(mi.span, ast::Attribute_ {
+        if attr::cfg_matches(&cfg, self.sess, self.features) {
+            self.process_cfg_attr(ast::Attribute {
                 id: attr::mk_attr_id(),
-                style: attr.node.style,
-                value: mi.clone(),
+                style: attr.style,
+                path,
+                tokens,
                 is_sugared_doc: false,
-            }))
+                span,
+            })
         } else {
             None
         }
     }
 
-    // Need the ability to run pre-expansion.
-    fn fold_mac(&mut self, mac: ast::Mac) -> ast::Mac {
-        fold::noop_fold_mac(mac, self)
+    // Determine if a node with the given attributes should be included in this configuration.
+    pub fn in_cfg(&mut self, attrs: &[ast::Attribute]) -> bool {
+        attrs.iter().all(|attr| {
+            // When not compiling with --test we should not compile the #[test] functions
+            if !self.should_test && is_test_or_bench(attr) {
+                return false;
+            }
+
+            let mis = if !is_cfg(attr) {
+                return true;
+            } else if let Some(mis) = attr.meta_item_list() {
+                mis
+            } else {
+                return true;
+            };
+
+            if mis.len() != 1 {
+                self.sess.span_diagnostic.span_err(attr.span, "expected 1 cfg-pattern");
+                return true;
+            }
+
+            if !mis[0].is_meta_item() {
+                self.sess.span_diagnostic.span_err(mis[0].span, "unexpected literal");
+                return true;
+            }
+
+            attr::cfg_matches(mis[0].meta_item().unwrap(), self.sess, self.features)
+        })
     }
+
+    // Visit attributes on expression and statements (but not attributes on items in blocks).
+    fn visit_expr_attrs(&mut self, attrs: &[ast::Attribute]) {
+        // flag the offending attributes
+        for attr in attrs.iter() {
+            self.maybe_emit_expr_attr_err(attr);
+        }
+    }
+
+    /// If attributes are not allowed on expressions, emit an error for `attr`
+    pub fn maybe_emit_expr_attr_err(&self, attr: &ast::Attribute) {
+        if !self.features.map(|features| features.stmt_expr_attributes).unwrap_or(true) {
+            let mut err = feature_err(self.sess,
+                                      "stmt_expr_attributes",
+                                      attr.span,
+                                      GateIssue::Language,
+                                      EXPLAIN_STMT_ATTR_SYNTAX);
+
+            if attr.is_sugared_doc {
+                err.help("`///` is for documentation comments. For a plain comment, use `//`.");
+            }
+
+            err.emit();
+        }
+    }
+
+    pub fn configure_foreign_mod(&mut self, foreign_mod: ast::ForeignMod) -> ast::ForeignMod {
+        ast::ForeignMod {
+            abi: foreign_mod.abi,
+            items: foreign_mod.items.into_iter().filter_map(|item| self.configure(item)).collect(),
+        }
+    }
+
+    fn configure_variant_data(&mut self, vdata: ast::VariantData) -> ast::VariantData {
+        match vdata {
+            ast::VariantData::Struct(fields, id) => {
+                let fields = fields.into_iter().filter_map(|field| self.configure(field));
+                ast::VariantData::Struct(fields.collect(), id)
+            }
+            ast::VariantData::Tuple(fields, id) => {
+                let fields = fields.into_iter().filter_map(|field| self.configure(field));
+                ast::VariantData::Tuple(fields.collect(), id)
+            }
+            ast::VariantData::Unit(id) => ast::VariantData::Unit(id)
+        }
+    }
+
+    pub fn configure_item_kind(&mut self, item: ast::ItemKind) -> ast::ItemKind {
+        match item {
+            ast::ItemKind::Struct(def, generics) => {
+                ast::ItemKind::Struct(self.configure_variant_data(def), generics)
+            }
+            ast::ItemKind::Union(def, generics) => {
+                ast::ItemKind::Union(self.configure_variant_data(def), generics)
+            }
+            ast::ItemKind::Enum(def, generics) => {
+                let variants = def.variants.into_iter().filter_map(|v| {
+                    self.configure(v).map(|v| {
+                        Spanned {
+                            node: ast::Variant_ {
+                                ident: v.node.ident,
+                                attrs: v.node.attrs,
+                                data: self.configure_variant_data(v.node.data),
+                                disr_expr: v.node.disr_expr,
+                            },
+                            span: v.span
+                        }
+                    })
+                });
+                ast::ItemKind::Enum(ast::EnumDef {
+                    variants: variants.collect(),
+                }, generics)
+            }
+            item => item,
+        }
+    }
+
+    pub fn configure_expr_kind(&mut self, expr_kind: ast::ExprKind) -> ast::ExprKind {
+        match expr_kind {
+            ast::ExprKind::Match(m, arms) => {
+                let arms = arms.into_iter().filter_map(|a| self.configure(a)).collect();
+                ast::ExprKind::Match(m, arms)
+            }
+            ast::ExprKind::Struct(path, fields, base) => {
+                let fields = fields.into_iter()
+                    .filter_map(|field| {
+                        self.configure(field)
+                    })
+                    .collect();
+                ast::ExprKind::Struct(path, fields, base)
+            }
+            _ => expr_kind,
+        }
+    }
+
+    pub fn configure_expr(&mut self, expr: P<ast::Expr>) -> P<ast::Expr> {
+        self.visit_expr_attrs(expr.attrs());
+
+        // If an expr is valid to cfg away it will have been removed by the
+        // outer stmt or expression folder before descending in here.
+        // Anything else is always required, and thus has to error out
+        // in case of a cfg attr.
+        //
+        // NB: This is intentionally not part of the fold_expr() function
+        //     in order for fold_opt_expr() to be able to avoid this check
+        if let Some(attr) = expr.attrs().iter().find(|a| is_cfg(a) || is_test_or_bench(a)) {
+            let msg = "removing an expression is not supported in this position";
+            self.sess.span_diagnostic.span_err(attr.span, msg);
+        }
+
+        self.process_cfg_attrs(expr)
+    }
+
+    pub fn configure_stmt(&mut self, stmt: ast::Stmt) -> Option<ast::Stmt> {
+        self.configure(stmt)
+    }
+
+    pub fn configure_struct_expr_field(&mut self, field: ast::Field) -> Option<ast::Field> {
+        self.configure(field)
+    }
+
+    pub fn configure_pat(&mut self, pattern: P<ast::Pat>) -> P<ast::Pat> {
+        pattern.map(|mut pattern| {
+            if let ast::PatKind::Struct(path, fields, etc) = pattern.node {
+                let fields = fields.into_iter()
+                    .filter_map(|field| {
+                        self.configure(field)
+                    })
+                    .collect();
+                pattern.node = ast::PatKind::Struct(path, fields, etc);
+            }
+            pattern
+        })
+    }
+
+    // deny #[cfg] on generic parameters until we decide what to do with it.
+    // see issue #51279.
+    pub fn disallow_cfg_on_generic_param(&mut self, param: &ast::GenericParam) {
+        for attr in param.attrs() {
+            let offending_attr = if attr.check_name("cfg") {
+                "cfg"
+            } else if attr.check_name("cfg_attr") {
+                "cfg_attr"
+            } else {
+                continue;
+            };
+            let msg = format!("#[{}] cannot be applied on a generic parameter", offending_attr);
+            self.sess.span_diagnostic.span_err(attr.span, &msg);
+        }
+    }
+}
+
+impl<'a> fold::Folder for StripUnconfigured<'a> {
+    fn fold_foreign_mod(&mut self, foreign_mod: ast::ForeignMod) -> ast::ForeignMod {
+        let foreign_mod = self.configure_foreign_mod(foreign_mod);
+        fold::noop_fold_foreign_mod(foreign_mod, self)
+    }
+
+    fn fold_item_kind(&mut self, item: ast::ItemKind) -> ast::ItemKind {
+        let item = self.configure_item_kind(item);
+        fold::noop_fold_item_kind(item, self)
+    }
+
+    fn fold_expr(&mut self, expr: P<ast::Expr>) -> P<ast::Expr> {
+        let mut expr = self.configure_expr(expr).into_inner();
+        expr.node = self.configure_expr_kind(expr.node);
+        P(fold::noop_fold_expr(expr, self))
+    }
+
+    fn fold_opt_expr(&mut self, expr: P<ast::Expr>) -> Option<P<ast::Expr>> {
+        let mut expr = configure!(self, expr).into_inner();
+        expr.node = self.configure_expr_kind(expr.node);
+        Some(P(fold::noop_fold_expr(expr, self)))
+    }
+
+    fn fold_stmt(&mut self, stmt: ast::Stmt) -> OneVector<ast::Stmt> {
+        match self.configure_stmt(stmt) {
+            Some(stmt) => fold::noop_fold_stmt(stmt, self),
+            None => return OneVector::new(),
+        }
+    }
+
+    fn fold_item(&mut self, item: P<ast::Item>) -> OneVector<P<ast::Item>> {
+        fold::noop_fold_item(configure!(self, item), self)
+    }
+
+    fn fold_impl_item(&mut self, item: ast::ImplItem) -> OneVector<ast::ImplItem> {
+        fold::noop_fold_impl_item(configure!(self, item), self)
+    }
+
+    fn fold_trait_item(&mut self, item: ast::TraitItem) -> OneVector<ast::TraitItem> {
+        fold::noop_fold_trait_item(configure!(self, item), self)
+    }
+
+    fn fold_mac(&mut self, mac: ast::Mac) -> ast::Mac {
+        // Don't configure interpolated AST (c.f. #34171).
+        // Interpolated AST will get configured once the surrounding tokens are parsed.
+        mac
+    }
+
+    fn fold_pat(&mut self, pattern: P<ast::Pat>) -> P<ast::Pat> {
+        fold::noop_fold_pat(self.configure_pat(pattern), self)
+    }
+}
+
+fn is_cfg(attr: &ast::Attribute) -> bool {
+    attr.check_name("cfg")
+}
+
+pub fn is_test_or_bench(attr: &ast::Attribute) -> bool {
+    attr.check_name("test") || attr.check_name("bench")
 }

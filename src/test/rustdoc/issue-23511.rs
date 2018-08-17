@@ -8,13 +8,13 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(no_std, lang_items, core)]
+#![feature(lang_items)]
 #![no_std]
 
 pub mod str {
     #![doc(primitive = "str")]
 
-    #[lang = "str"]
+    #[lang = "str_alloc"]
     impl str {
         // @has search-index.js foo
         pub fn foo(&self) {}

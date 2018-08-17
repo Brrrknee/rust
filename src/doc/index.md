@@ -1,72 +1,81 @@
 % Rust Documentation
 
-Welcome to the Rust documentation! You can use the section headings above
-to jump to any particular section.
+<style>
+nav {
+    display: none;
+}
+</style>
 
-# Getting Started
+Welcome to an overview of the documentation provided by the Rust project.
+All of these projects are managed by the Docs Team; there are other
+unofficial documentation resources as well!
 
-If you haven't seen Rust at all yet, the first thing you should read is the
-introduction to [The Rust Programming Language](book/index.html). It'll give
-you a good idea of what Rust is like.
+Many of these resources take the form of "books"; we collectively call these
+"The Rust Bookshelf." Some are large, some are small.
 
-The book provides a lengthy explanation of Rust, its syntax, and its
-concepts. Upon completing the book, you'll be an intermediate Rust
-developer, and will have a good grasp of the fundamental ideas behind
-Rust.
+# Learn Rust
 
-[Rust By Example][rbe] teaches you Rust through a series of small
-examples.
+If you'd like to learn Rust, this is the spot for you! All of these resources
+assume that you have programmed before, but not in any specific language:
 
-[rbe]: http://rustbyexample.com/
+## The Rust Programming Language
 
-# Language Reference
+Affectionately nicknamed "the book," [The Rust Programming
+Language](book/index.html) will give you an overview of the language from
+first principles. You'll build a few projects along the way, and by the end,
+you'll have a solid grasp of the language.
 
-Rust does not have an exact specification yet, but an effort to describe as much of
-the language in as much detail as possible is in [the reference](reference.html).
+## Rust By Example
 
-# Standard Library Reference
+If reading multiple hundreds of pages about a language isn't your style, then
+[Rust By Example](rust-by-example/index.html) has you covered. While the book talks about code with
+a lot of words, RBE shows off a bunch of code, and keeps the talking to a
+minimum. It also includes exercises!
 
-We have [API documentation for the entire standard
-library](std/index.html). There's a list of crates on the left with more
-specific sections, or you can use the search bar at the top to search for
-something if you know its name.
+# Use Rust
 
-# The Rustonomicon
+Once you've gotten familliar with the language, these resources can help you
+when you're actually using it day-to-day.
 
-[The Rustonomicon] is an entire book dedicated to explaining
-how to write `unsafe` Rust code. It is for advanced Rust programmers.
+## The Standard Library
 
-[The Rustonomicon]: nomicon/index.html
+Rust's standard library has [extensive API documentation](std/index.html),
+with explanations of how to use various things, as well as example code for
+accomplishing various tasks.
 
-# Tools
+## The Rustc Book
 
-[Cargo](http://doc.crates.io/index.html) is the Rust package manager providing access to libraries
-beyond the standard one, and its website contains lots of good documentation.
+[The Rustc Book](rustc/index.html) describes the Rust compiler, `rustc`.
 
-[`rustdoc`](book/documentation.html) is the Rust's documentation generator, a tool converting
-annotated source code into HTML docs.
+## The Cargo Book
 
-# FAQs
+[The Cargo Book](cargo/index.html) is a guide to Cargo, Rust's build tool and dependency manager.
 
-There are questions that are asked quite often, so we've made FAQs for them:
+## The Rustdoc Book
 
-* [Language Design FAQ](complement-design-faq.html)
-* [Language FAQ](complement-lang-faq.html)
-* [Project FAQ](complement-project-faq.html)
-* [How to submit a bug report](https://github.com/rust-lang/rust/blob/master/CONTRIBUTING.md#bug-reports)
+[The Rustdoc Book](rustdoc/index.html) describes our documentation tool, `rustdoc`.
 
-# The Error Index
+## Extended Error Listing
 
-If you encounter an error while compiling your code you may be able to look it
-up in the [Rust Compiler Error Index](error-index.html).
+Many of Rust's errors come with error codes, and you can request extended
+diagnostics from the compiler on those errors. You can also [read them
+here](error-index.html), if you prefer to read them that way.
 
-# Community Translations
+# Master Rust
 
-Several projects have been started to translate the documentation into other
-languages:
+Once you're quite familiar with the language, you may find these advanced
+resources useful.
 
-- [Russian](https://github.com/kgv/rust_book_ru)
-- [Korean](https://github.com/rust-kr/doc.rust-kr.org)
-- [Chinese](https://github.com/KaiserY/rust-book-chinese)
-- [Spanish](https://goyox86.github.io/elpr)
-- [German](https://panicbit.github.io/rustbook-de)
+## The Reference
+
+[The Reference](reference/index.html) is not a formal spec, but is more detailed and
+comprehensive than the book.
+
+## The Rustonomicon
+
+[The Rustonomicon](nomicon/index.html) is your guidebook to the dark arts of unsafe
+Rust. It's also sometimes called "the 'nomicon."
+
+## The Unstable Book
+
+[The Unstable Book](unstable-book/index.html) has documentation for unstable features.

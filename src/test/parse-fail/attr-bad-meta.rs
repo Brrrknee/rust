@@ -8,10 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// compile-flags: -Z parse-only
+#![feature(unrestricted_attribute_tokens)]
 
-// error-pattern:expected `]`
-
-// asterisk is bogus
-#[attr*]
+#[path*] //~ ERROR expected one of `(`, `::`, `=`, `[`, `]`, or `{`, found `*`
 mod m {}

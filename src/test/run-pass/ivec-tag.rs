@@ -8,17 +8,15 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// pretty-expanded FIXME #23616
-
-#![feature(std_misc)]
+// ignore-emscripten no threads support
 
 use std::thread;
 use std::sync::mpsc::{channel, Sender};
 
 fn producer(tx: &Sender<Vec<u8>>) {
     tx.send(
-         vec!(1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
-          13)).unwrap();
+         vec![1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12,
+          13]).unwrap();
 }
 
 pub fn main() {

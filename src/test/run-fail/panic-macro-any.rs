@@ -10,9 +10,8 @@
 
 // error-pattern:panicked at 'Box<Any>'
 
-#![allow(unknown_features)]
 #![feature(box_syntax)]
 
 fn main() {
-    panic!(box 413 as Box<::std::any::Any+Send>);
+    panic!(box 413 as Box<::std::any::Any + Send>);
 }

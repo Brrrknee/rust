@@ -29,7 +29,7 @@ showing the expected renderings.
 
 In order to avoid one-off dependencies for this task, this script uses
 a reasonably working HTML parser and the existing XPath implementation
-from Python 2's standard library. Hopefully we won't render
+from Python's standard library. Hopefully we won't render
 non-well-formed HTML.
 
 # Commands
@@ -99,28 +99,43 @@ There are a number of supported commands:
 * `@count PATH XPATH COUNT' checks for the occurrence of given XPath
   in the given file. The number of occurrences must match the given count.
 
+* `@has-dir PATH` checks for the existence of the given directory.
+
 All conditions can be negated with `!`. `@!has foo/type.NoSuch.html`
 checks if the given file does not exist, for example.
 
 """
 
+from __future__ import print_function
 import sys
 import os.path
 import re
 import shlex
 from collections import namedtuple
-from HTMLParser import HTMLParser
+try:
+    from html.parser import HTMLParser
+except ImportError:
+    from HTMLParser import HTMLParser
 from xml.etree import cElementTree as ET
 
 # &larrb;/&rarrb; are not in HTML 4 but are in HTML 5
-from htmlentitydefs import entitydefs
+try:
+    from html.entities import entitydefs
+except ImportError:
+    from htmlentitydefs import entitydefs
 entitydefs['larrb'] = u'\u21e4'
 entitydefs['rarrb'] = u'\u21e5'
+entitydefs['nbsp'] = ' '
 
 # "void elements" (no closing tag) from the HTML Standard section 12.1.2
 VOID_ELEMENTS = set(['area', 'base', 'br', 'col', 'embed', 'hr', 'img', 'input', 'keygen',
                      'link', 'menuitem', 'meta', 'param', 'source', 'track', 'wbr'])
 
+# Python 2 -> 3 compatibility
+try:
+    unichr
+except NameError:
+    unichr = chr
 
 class CustomHTMLParser(HTMLParser):
     """simplified HTML parser.
@@ -160,8 +175,13 @@ class CustomHTMLParser(HTMLParser):
         HTMLParser.close(self)
         return self.__builder.close()
 
-Command = namedtuple('Command', 'negated cmd args lineno')
+Command = namedtuple('Command', 'negated cmd args lineno context')
 
+class FailedCheck(Exception):
+    pass
+
+class InvalidCheck(Exception):
+    pass
 
 def concat_multi_lines(f):
     """returns a generator out of the file object, which
@@ -177,12 +197,8 @@ def concat_multi_lines(f):
 
         # strip the common prefix from the current line if needed
         if lastline is not None:
-            maxprefix = 0
-            for i in xrange(min(len(line), len(lastline))):
-                if line[i] != lastline[i]:
-                    break
-                maxprefix += 1
-            line = line[maxprefix:].lstrip()
+            common_prefix = os.path.commonprefix([line, lastline])
+            line = line[len(common_prefix):].lstrip()
 
         firstlineno = firstlineno or lineno
         if line.endswith('\\'):
@@ -196,7 +212,7 @@ def concat_multi_lines(f):
             catenated = ''
 
     if lastline is not None:
-        raise RuntimeError('Trailing backslash in the end of file')
+        print_err(lineno, line, 'Trailing backslash at the end of the file')
 
 LINE_PATTERN = re.compile(r'''
     (?<=(?<!\S)@)(?P<negated>!?)
@@ -206,7 +222,7 @@ LINE_PATTERN = re.compile(r'''
 
 
 def get_commands(template):
-    with open(template, 'rUb') as f:
+    with open(template, 'rU') as f:
         for lineno, line in concat_multi_lines(f):
             m = LINE_PATTERN.search(line)
             if not m:
@@ -216,9 +232,10 @@ def get_commands(template):
             cmd = m.group('cmd')
             args = m.group('args')
             if args and not args[:1].isspace():
-                raise RuntimeError('Invalid template syntax at line {}'.format(lineno+1))
+                print_err(lineno, line, 'Invalid template syntax')
+                continue
             args = shlex.split(args)
-            yield Command(negated=negated, cmd=cmd, args=args, lineno=lineno+1)
+            yield Command(negated=negated, cmd=cmd, args=args, lineno=lineno+1, context=line)
 
 
 def _flatten(node, acc):
@@ -242,8 +259,7 @@ def normalize_xpath(path):
     elif path.startswith('.//'):
         return path
     else:
-        raise RuntimeError('Non-absolute XPath is not supported due to \
-                            the implementation issue.')
+        raise InvalidCheck('Non-absolute XPath is not supported due to implementation issues')
 
 
 class CachedFiles(object):
@@ -259,41 +275,46 @@ class CachedFiles(object):
             self.last_path = path
             return path
         elif self.last_path is None:
-            raise RuntimeError('Tried to use the previous path in the first command')
+            raise InvalidCheck('Tried to use the previous path in the first command')
         else:
             return self.last_path
 
     def get_file(self, path):
         path = self.resolve_path(path)
-        try:
+        if path in self.files:
             return self.files[path]
-        except KeyError:
-            try:
-                with open(os.path.join(self.root, path)) as f:
-                    data = f.read()
-            except Exception as e:
-                raise RuntimeError('Cannot open file {!r}: {}'.format(path, e))
-            else:
-                self.files[path] = data
-                return data
+
+        abspath = os.path.join(self.root, path)
+        if not(os.path.exists(abspath) and os.path.isfile(abspath)):
+            raise FailedCheck('File does not exist {!r}'.format(path))
+
+        with open(abspath) as f:
+            data = f.read()
+            self.files[path] = data
+            return data
 
     def get_tree(self, path):
         path = self.resolve_path(path)
-        try:
+        if path in self.trees:
             return self.trees[path]
-        except KeyError:
+
+        abspath = os.path.join(self.root, path)
+        if not(os.path.exists(abspath) and os.path.isfile(abspath)):
+            raise FailedCheck('File does not exist {!r}'.format(path))
+
+        with open(abspath) as f:
             try:
-                f = open(os.path.join(self.root, path))
-            except Exception as e:
-                raise RuntimeError('Cannot open file {!r}: {}'.format(path, e))
-            try:
-                with f:
-                    tree = ET.parse(f, CustomHTMLParser())
+                tree = ET.parse(f, CustomHTMLParser())
             except Exception as e:
                 raise RuntimeError('Cannot parse an HTML file {!r}: {}'.format(path, e))
-            else:
-                self.trees[path] = tree
-                return self.trees[path]
+            self.trees[path] = tree
+            return self.trees[path]
+
+    def get_dir(self, path):
+        path = self.resolve_path(path)
+        abspath = os.path.join(self.root, path)
+        if not(os.path.exists(abspath) and os.path.isdir(abspath)):
+            raise FailedCheck('Directory does not exist {!r}'.format(path))
 
 
 def check_string(data, pat, regexp):
@@ -311,87 +332,131 @@ def check_tree_attr(tree, path, attr, pat, regexp):
     path = normalize_xpath(path)
     ret = False
     for e in tree.findall(path):
-        try:
+        if attr in e.attrib:
             value = e.attrib[attr]
-        except KeyError:
-            continue
         else:
-            ret = check_string(value, pat, regexp)
-            if ret:
-                break
+            continue
+
+        ret = check_string(value, pat, regexp)
+        if ret:
+            break
     return ret
 
 
 def check_tree_text(tree, path, pat, regexp):
     path = normalize_xpath(path)
     ret = False
-    for e in tree.findall(path):
-        try:
-            value = flatten(e)
-        except KeyError:
-            continue
-        else:
-            ret = check_string(value, pat, regexp)
-            if ret:
-                break
+    try:
+        for e in tree.findall(path):
+            try:
+                value = flatten(e)
+            except KeyError:
+                continue
+            else:
+                ret = check_string(value, pat, regexp)
+                if ret:
+                    break
+    except Exception as e:
+        print('Failed to get path "{}"'.format(path))
+        raise e
     return ret
 
 
-def check_tree_count(tree, path, count):
+def get_tree_count(tree, path):
     path = normalize_xpath(path)
-    return len(tree.findall(path)) == count
+    return len(tree.findall(path))
 
+def stderr(*args):
+    print(*args, file=sys.stderr)
 
-def check(target, commands):
-    cache = CachedFiles(target)
-    for c in commands:
+def print_err(lineno, context, err, message=None):
+    global ERR_COUNT
+    ERR_COUNT += 1
+    stderr("{}: {}".format(lineno, message or err))
+    if message and err:
+        stderr("\t{}".format(err))
+
+    if context:
+        stderr("\t{}".format(context))
+
+ERR_COUNT = 0
+
+def check_command(c, cache):
+    try:
+        cerr = ""
         if c.cmd == 'has' or c.cmd == 'matches': # string test
             regexp = (c.cmd == 'matches')
             if len(c.args) == 1 and not regexp: # @has <path> = file existence
                 try:
                     cache.get_file(c.args[0])
                     ret = True
-                except RuntimeError:
+                except FailedCheck as err:
+                    cerr = str(err)
                     ret = False
             elif len(c.args) == 2: # @has/matches <path> <pat> = string test
+                cerr = "`PATTERN` did not match"
                 ret = check_string(cache.get_file(c.args[0]), c.args[1], regexp)
             elif len(c.args) == 3: # @has/matches <path> <pat> <match> = XML tree test
+                cerr = "`XPATH PATTERN` did not match"
                 tree = cache.get_tree(c.args[0])
                 pat, sep, attr = c.args[1].partition('/@')
                 if sep: # attribute
-                    ret = check_tree_attr(cache.get_tree(c.args[0]), pat, attr, c.args[2], regexp)
+                    tree = cache.get_tree(c.args[0])
+                    ret = check_tree_attr(tree, pat, attr, c.args[2], regexp)
                 else: # normalized text
                     pat = c.args[1]
                     if pat.endswith('/text()'):
                         pat = pat[:-7]
                     ret = check_tree_text(cache.get_tree(c.args[0]), pat, c.args[2], regexp)
             else:
-                raise RuntimeError('Invalid number of @{} arguments \
-                                    at line {}'.format(c.cmd, c.lineno))
+                raise InvalidCheck('Invalid number of @{} arguments'.format(c.cmd))
 
         elif c.cmd == 'count': # count test
             if len(c.args) == 3: # @count <path> <pat> <count> = count test
-                ret = check_tree_count(cache.get_tree(c.args[0]), c.args[1], int(c.args[2]))
+                expected = int(c.args[2])
+                found = get_tree_count(cache.get_tree(c.args[0]), c.args[1])
+                cerr = "Expected {} occurrences but found {}".format(expected, found)
+                ret = expected == found
             else:
-                raise RuntimeError('Invalid number of @{} arguments \
-                                    at line {}'.format(c.cmd, c.lineno))
-
+                raise InvalidCheck('Invalid number of @{} arguments'.format(c.cmd))
+        elif c.cmd == 'has-dir': # has-dir test
+            if len(c.args) == 1: # @has-dir <path> = has-dir test
+                try:
+                    cache.get_dir(c.args[0])
+                    ret = True
+                except FailedCheck as err:
+                    cerr = str(err)
+                    ret = False
+            else:
+                raise InvalidCheck('Invalid number of @{} arguments'.format(c.cmd))
         elif c.cmd == 'valid-html':
-            raise RuntimeError('Unimplemented @valid-html at line {}'.format(c.lineno))
+            raise InvalidCheck('Unimplemented @valid-html')
 
         elif c.cmd == 'valid-links':
-            raise RuntimeError('Unimplemented @valid-links at line {}'.format(c.lineno))
-
+            raise InvalidCheck('Unimplemented @valid-links')
         else:
-            raise RuntimeError('Unrecognized @{} at line {}'.format(c.cmd, c.lineno))
+            raise InvalidCheck('Unrecognized @{}'.format(c.cmd))
 
         if ret == c.negated:
-            raise RuntimeError('@{}{} check failed at line {}'.format('!' if c.negated else '',
-                                                                      c.cmd, c.lineno))
+            raise FailedCheck(cerr)
+
+    except FailedCheck as err:
+        message = '@{}{} check failed'.format('!' if c.negated else '', c.cmd)
+        print_err(c.lineno, c.context, str(err), message)
+    except InvalidCheck as err:
+        print_err(c.lineno, c.context, str(err))
+
+def check(target, commands):
+    cache = CachedFiles(target)
+    for c in commands:
+        check_command(c, cache)
 
 if __name__ == '__main__':
-    if len(sys.argv) < 3:
-        print >>sys.stderr, 'Usage: {} <doc dir> <template>'.format(sys.argv[0])
+    if len(sys.argv) != 3:
+        stderr('Usage: {} <doc dir> <template>'.format(sys.argv[0]))
         raise SystemExit(1)
-    else:
-        check(sys.argv[1], get_commands(sys.argv[2]))
+
+    check(sys.argv[1], get_commands(sys.argv[2]))
+    if ERR_COUNT:
+        stderr("\nEncountered {} errors".format(ERR_COUNT))
+        raise SystemExit(1)

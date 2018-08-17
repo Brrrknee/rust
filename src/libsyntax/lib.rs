@@ -14,71 +14,128 @@
 //!
 //! This API is completely unstable and subject to change.
 
-// Do not remove on snapshot creation. Needed for bootstrap. (Issue #22364)
-#![cfg_attr(stage0, feature(custom_attribute))]
-#![crate_name = "syntax"]
-#![unstable(feature = "rustc_private", issue = "27812")]
-#![cfg_attr(stage0, staged_api)]
-#![crate_type = "dylib"]
-#![crate_type = "rlib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
        test(attr(deny(warnings))))]
 
-#![cfg_attr(stage0, feature(rustc_attrs))]
-#![cfg_attr(stage0, allow(unused_attributes))]
-#![feature(associated_consts)]
-#![feature(drain)]
-#![feature(filling_drop)]
-#![feature(libc)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
-#![feature(str_char)]
+#![feature(crate_visibility_modifier)]
+#![feature(macro_at_most_once_rep)]
+#![cfg_attr(not(stage0), feature(nll))]
+#![feature(rustc_attrs)]
+#![feature(rustc_diagnostic_macros)]
+#![feature(slice_sort_by_cached_key)]
 #![feature(str_escape)]
-#![feature(unicode)]
-#![feature(vec_push_all)]
+#![feature(unicode_internals)]
+#![feature(catch_expr)]
 
-extern crate fmt_macros;
+#![recursion_limit="256"]
+
+#[macro_use] extern crate bitflags;
+extern crate core;
 extern crate serialize;
-extern crate term;
-extern crate libc;
 #[macro_use] extern crate log;
-#[macro_use] #[no_link] extern crate rustc_bitflags;
+pub extern crate rustc_errors as errors;
+extern crate syntax_pos;
+extern crate rustc_data_structures;
+extern crate rustc_target;
+#[macro_use] extern crate scoped_tls;
 
 extern crate serialize as rustc_serialize; // used by deriving
 
-// A variant of 'try!' that panics on Err(FatalError). This is used as a
-// crutch on the way towards a non-panic!-prone parser. It should be used
-// for fatal parsing errors; eventually we plan to convert all code using
-// panictry to just use normal try
+use rustc_data_structures::sync::Lock;
+use rustc_data_structures::bitvec::BitVector;
+pub use rustc_data_structures::small_vec::OneVector;
+pub use rustc_data_structures::thin_vec::ThinVec;
+use ast::AttrId;
+
+// A variant of 'try!' that panics on an Err. This is used as a crutch on the
+// way towards a non-panic!-prone parser. It should be used for fatal parsing
+// errors; eventually we plan to convert all code using panictry to just use
+// normal try.
+// Exported for syntax_ext, not meant for general use.
+#[macro_export]
 macro_rules! panictry {
     ($e:expr) => ({
         use std::result::Result::{Ok, Err};
-        use diagnostic::FatalError;
+        use errors::FatalError;
         match $e {
             Ok(e) => e,
-            Err(FatalError) => panic!(FatalError)
+            Err(mut e) => {
+                e.emit();
+                FatalError.raise()
+            }
         }
     })
 }
 
+#[macro_export]
+macro_rules! unwrap_or {
+    ($opt:expr, $default:expr) => {
+        match $opt {
+            Some(x) => x,
+            None => $default,
+        }
+    }
+}
+
+pub struct Globals {
+    used_attrs: Lock<BitVector<AttrId>>,
+    known_attrs: Lock<BitVector<AttrId>>,
+    syntax_pos_globals: syntax_pos::Globals,
+}
+
+impl Globals {
+    fn new() -> Globals {
+        Globals {
+            // We have no idea how many attributes their will be, so just
+            // initiate the vectors with 0 bits. We'll grow them as necessary.
+            used_attrs: Lock::new(BitVector::new()),
+            known_attrs: Lock::new(BitVector::new()),
+            syntax_pos_globals: syntax_pos::Globals::new(),
+        }
+    }
+}
+
+pub fn with_globals<F, R>(f: F) -> R
+    where F: FnOnce() -> R
+{
+    let globals = Globals::new();
+    GLOBALS.set(&globals, || {
+        syntax_pos::GLOBALS.set(&globals.syntax_pos_globals, f)
+    })
+}
+
+scoped_thread_local!(pub static GLOBALS: Globals);
+
+#[macro_use]
+pub mod diagnostics {
+    #[macro_use]
+    pub mod macros;
+    pub mod plugin;
+    pub mod metadata;
+}
+
+// NB: This module needs to be declared first so diagnostics are
+// registered before they are used.
+pub mod diagnostic_list;
+
 pub mod util {
-    pub mod interner;
     pub mod lev_distance;
     pub mod node_count;
     pub mod parser;
     #[cfg(test)]
     pub mod parser_testing;
-    pub mod small_vector;
+    pub mod move_map;
+
+    mod rc_slice;
+    pub use self::rc_slice::RcSlice;
+
+    mod rc_vec;
+    pub use self::rc_vec::RcVec;
 }
 
-pub mod diagnostics {
-    pub mod macros;
-    pub mod plugin;
-    pub mod registry;
-    pub mod metadata;
-}
+pub mod json;
 
 pub mod syntax {
     pub use ext;
@@ -86,23 +143,23 @@ pub mod syntax {
     pub use ast;
 }
 
-pub mod abi;
 pub mod ast;
-pub mod ast_util;
 pub mod attr;
 pub mod codemap;
+#[macro_use]
 pub mod config;
-pub mod diagnostic;
 pub mod entry;
 pub mod feature_gate;
 pub mod fold;
-pub mod owned_slice;
 pub mod parse;
 pub mod ptr;
 pub mod show_span;
 pub mod std_inject;
 pub mod str;
+pub use syntax_pos::edition;
+pub use syntax_pos::symbol;
 pub mod test;
+pub mod tokenstream;
 pub mod visit;
 
 pub mod print {
@@ -111,25 +168,26 @@ pub mod print {
 }
 
 pub mod ext {
-    pub mod asm;
+    pub use syntax_pos::hygiene;
     pub mod base;
     pub mod build;
-    pub mod cfg;
-    pub mod concat;
-    pub mod concat_idents;
-    pub mod deriving;
-    pub mod env;
+    pub mod derive;
     pub mod expand;
-    pub mod format;
-    pub mod log_syntax;
-    pub mod mtwt;
+    pub mod placeholders;
     pub mod quote;
     pub mod source_util;
-    pub mod trace_macros;
 
     pub mod tt {
         pub mod transcribe;
         pub mod macro_parser;
         pub mod macro_rules;
+        pub mod quoted;
     }
 }
+
+pub mod early_buffered_lints;
+
+#[cfg(test)]
+mod test_snippet;
+
+__build_diagnostic_array! { libsyntax, DIAGNOSTICS }

@@ -11,8 +11,6 @@
 // Tests that you can use an early-bound lifetime parameter as
 // on of the generic parameters in a trait.
 
-
-#![allow(unknown_features)]
 #![feature(box_syntax)]
 
 trait Trait<'a> {
@@ -63,7 +61,7 @@ fn make_val<T:MakerTrait>() -> T {
 }
 
 trait RefMakerTrait<'q> {
-    fn mk(Self) -> &'q Self;
+    fn mk(_: Self) -> &'q Self;
 }
 
 fn make_ref<'r, T:RefMakerTrait<'r>>(t:T) -> &'r T {

@@ -8,37 +8,42 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-use prelude::v1::*;
-
 use cell::Cell;
 use ptr;
-use sync::{StaticMutex, Arc};
+use sync::Arc;
 use sys_common;
+use sys_common::mutex::Mutex;
 
 pub struct Lazy<T> {
-    lock: StaticMutex,
+    // We never call `lock.init()`, so it is UB to attempt to acquire this mutex reentrantly!
+    lock: Mutex,
     ptr: Cell<*mut Arc<T>>,
     init: fn() -> Arc<T>,
 }
 
+#[inline]
+const fn done<T>() -> *mut Arc<T> { 1_usize as *mut _ }
+
 unsafe impl<T> Sync for Lazy<T> {}
 
 impl<T: Send + Sync + 'static> Lazy<T> {
-    pub const fn new(init: fn() -> Arc<T>) -> Lazy<T> {
+    /// Safety: `init` must not call `get` on the variable that is being
+    /// initialized.
+    pub const unsafe fn new(init: fn() -> Arc<T>) -> Lazy<T> {
         Lazy {
-            lock: StaticMutex::new(),
+            lock: Mutex::new(),
             ptr: Cell::new(ptr::null_mut()),
-            init: init
+            init,
         }
     }
 
     pub fn get(&'static self) -> Option<Arc<T>> {
-        let _g = self.lock.lock();
-        let ptr = self.ptr.get();
         unsafe {
+            let _guard = self.lock.lock();
+            let ptr = self.ptr.get();
             if ptr.is_null() {
                 Some(self.init())
-            } else if ptr as usize == 1 {
+            } else if ptr == done() {
                 None
             } else {
                 Some((*ptr).clone())
@@ -46,18 +51,22 @@ impl<T: Send + Sync + 'static> Lazy<T> {
         }
     }
 
+    // Must only be called with `lock` held
     unsafe fn init(&'static self) -> Arc<T> {
         // If we successfully register an at exit handler, then we cache the
         // `Arc` allocation in our own internal box (it will get deallocated by
         // the at exit handler). Otherwise we just return the freshly allocated
         // `Arc`.
         let registered = sys_common::at_exit(move || {
-            let g = self.lock.lock();
-            let ptr = self.ptr.get();
-            self.ptr.set(1 as *mut _);
-            drop(g);
+            let ptr = {
+                let _guard = self.lock.lock();
+                self.ptr.replace(done())
+            };
             drop(Box::from_raw(ptr))
         });
+        // This could reentrantly call `init` again, which is a problem
+        // because our `lock` allows reentrancy!
+        // That's why `new` is unsafe and requires the caller to ensure no reentrancy happens.
         let ret = (self.init)();
         if registered.is_ok() {
             self.ptr.set(Box::into_raw(Box::new(ret.clone())));

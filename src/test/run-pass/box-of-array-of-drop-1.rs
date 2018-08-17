@@ -11,7 +11,7 @@
 // Test that we cleanup a fixed size Box<[D; k]> properly when D has a
 // destructor.
 
-#![feature(const_fn)]
+// ignore-emscripten no threads support
 
 use std::thread;
 use std::sync::atomic::{AtomicUsize, Ordering};

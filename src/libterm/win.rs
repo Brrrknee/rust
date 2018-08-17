@@ -17,9 +17,9 @@ extern crate libc;
 use std::io;
 use std::io::prelude::*;
 
-use attr;
+use Attr;
 use color;
-use {Terminal, UnwrappableTerminal};
+use Terminal;
 
 /// A Terminal implementation which uses the Win32 Console API.
 pub struct WinConsole<T> {
@@ -91,7 +91,7 @@ fn bits_to_color(bits: u16) -> color::Color {
     color | (bits & 0x8) // copy the hi-intensity bit
 }
 
-impl<T: Write+Send+'static> WinConsole<T> {
+impl<T: Write + Send + 'static> WinConsole<T> {
     fn apply(&mut self) {
         let _unused = self.buf.flush();
         let mut accum: WORD = 0;
@@ -115,7 +115,7 @@ impl<T: Write+Send+'static> WinConsole<T> {
 
     /// Returns `None` whenever the terminal cannot be created for some
     /// reason.
-    pub fn new(out: T) -> Option<Box<Terminal<T> + Send + 'static>> {
+    pub fn new(out: T) -> io::Result<WinConsole<T>> {
         let fg;
         let bg;
         unsafe {
@@ -128,7 +128,7 @@ impl<T: Write+Send+'static> WinConsole<T> {
                 bg = color::BLACK;
             }
         }
-        Some(box WinConsole {
+        Ok(WinConsole {
             buf: out,
             def_foreground: fg,
             def_background: bg,
@@ -148,7 +148,9 @@ impl<T: Write> Write for WinConsole<T> {
     }
 }
 
-impl<T: Write+Send+'static> Terminal<T> for WinConsole<T> {
+impl<T: Write + Send + 'static> Terminal for WinConsole<T> {
+    type Output = T;
+
     fn fg(&mut self, color: color::Color) -> io::Result<bool> {
         self.foreground = color;
         self.apply();
@@ -163,14 +165,14 @@ impl<T: Write+Send+'static> Terminal<T> for WinConsole<T> {
         Ok(true)
     }
 
-    fn attr(&mut self, attr: attr::Attr) -> io::Result<bool> {
+    fn attr(&mut self, attr: Attr) -> io::Result<bool> {
         match attr {
-            attr::ForegroundColor(f) => {
+            Attr::ForegroundColor(f) => {
                 self.foreground = f;
                 self.apply();
                 Ok(true)
             }
-            attr::BackgroundColor(b) => {
+            Attr::BackgroundColor(b) => {
                 self.background = b;
                 self.apply();
                 Ok(true)
@@ -179,34 +181,34 @@ impl<T: Write+Send+'static> Terminal<T> for WinConsole<T> {
         }
     }
 
-    fn supports_attr(&self, attr: attr::Attr) -> bool {
+    fn supports_attr(&self, attr: Attr) -> bool {
         // it claims support for underscore and reverse video, but I can't get
         // it to do anything -cmr
         match attr {
-            attr::ForegroundColor(_) | attr::BackgroundColor(_) => true,
+            Attr::ForegroundColor(_) | Attr::BackgroundColor(_) => true,
             _ => false,
         }
     }
 
-    fn reset(&mut self) -> io::Result<()> {
+    fn reset(&mut self) -> io::Result<bool> {
         self.foreground = self.def_foreground;
         self.background = self.def_background;
         self.apply();
 
-        Ok(())
+        Ok(true)
     }
 
-    fn get_ref<'a>(&'a self) -> &'a T {
+    fn get_ref(&self) -> &T {
         &self.buf
     }
 
-    fn get_mut<'a>(&'a mut self) -> &'a mut T {
+    fn get_mut(&mut self) -> &mut T {
         &mut self.buf
     }
-}
 
-impl<T: Write+Send+'static> UnwrappableTerminal<T> for WinConsole<T> {
-    fn unwrap(self) -> T {
+    fn into_inner(self) -> T
+        where Self: Sized
+    {
         self.buf
     }
 }

@@ -13,90 +13,73 @@
 //! Does not support hashed database, only filesystem!
 
 use std::env;
-use std::fs::File;
-use std::io::prelude::*;
+use std::fs;
 use std::path::PathBuf;
 
 /// Return path to database entry for `term`
 #[allow(deprecated)]
-pub fn get_dbpath_for_term(term: &str) -> Option<Box<PathBuf>> {
-    if term.is_empty() {
-        return None;
-    }
-
-    let homedir = env::home_dir();
-
+pub fn get_dbpath_for_term(term: &str) -> Option<PathBuf> {
     let mut dirs_to_search = Vec::new();
-    let first_char = term.char_at(0);
+    let first_char = term.chars().next()?;
 
     // Find search directory
-    match env::var_os("TERMINFO") {
-        Some(dir) => dirs_to_search.push(PathBuf::from(dir)),
-        None => {
-            if homedir.is_some() {
-                // ncurses compatibility;
-                dirs_to_search.push(homedir.unwrap().join(".terminfo"))
-            }
-            match env::var("TERMINFO_DIRS") {
-                Ok(dirs) => {
-                    for i in dirs.split(':') {
-                        if i == "" {
-                            dirs_to_search.push(PathBuf::from("/usr/share/terminfo"));
-                        } else {
-                            dirs_to_search.push(PathBuf::from(i));
-                        }
-                    }
-                }
-                // Found nothing in TERMINFO_DIRS, use the default paths:
-                // According to  /etc/terminfo/README, after looking at
-                // ~/.terminfo, ncurses will search /etc/terminfo, then
-                // /lib/terminfo, and eventually /usr/share/terminfo.
-                Err(..) => {
-                    dirs_to_search.push(PathBuf::from("/etc/terminfo"));
-                    dirs_to_search.push(PathBuf::from("/lib/terminfo"));
-                    dirs_to_search.push(PathBuf::from("/usr/share/terminfo"));
-                }
+    if let Some(dir) = env::var_os("TERMINFO") {
+        dirs_to_search.push(PathBuf::from(dir));
+    }
+
+    if let Ok(dirs) = env::var("TERMINFO_DIRS") {
+        for i in dirs.split(':') {
+            if i == "" {
+                dirs_to_search.push(PathBuf::from("/usr/share/terminfo"));
+            } else {
+                dirs_to_search.push(PathBuf::from(i));
             }
         }
-    };
+    } else {
+        // Found nothing in TERMINFO_DIRS, use the default paths:
+        // According to  /etc/terminfo/README, after looking at
+        // ~/.terminfo, ncurses will search /etc/terminfo, then
+        // /lib/terminfo, and eventually /usr/share/terminfo.
+        // On Haiku the database can be found at /boot/system/data/terminfo
+        if let Some(mut homedir) = env::home_dir() {
+            homedir.push(".terminfo");
+            dirs_to_search.push(homedir)
+        }
+
+        dirs_to_search.push(PathBuf::from("/etc/terminfo"));
+        dirs_to_search.push(PathBuf::from("/lib/terminfo"));
+        dirs_to_search.push(PathBuf::from("/usr/share/terminfo"));
+        dirs_to_search.push(PathBuf::from("/boot/system/data/terminfo"));
+    }
 
     // Look for the terminal in all of the search directories
-    for p in &dirs_to_search {
-        if p.exists() {
-            let f = first_char.to_string();
-            let newp = p.join(&f).join(term);
-            if newp.exists() {
-                return Some(box newp);
+    for mut p in dirs_to_search {
+        if fs::metadata(&p).is_ok() {
+            p.push(&first_char.to_string());
+            p.push(&term);
+            if fs::metadata(&p).is_ok() {
+                return Some(p);
             }
-            // on some installations the dir is named after the hex of the char (e.g. OS X)
-            let f = format!("{:x}", first_char as usize);
-            let newp = p.join(&f).join(term);
-            if newp.exists() {
-                return Some(box newp);
+            p.pop();
+            p.pop();
+
+            // on some installations the dir is named after the hex of the char
+            // (e.g. macOS)
+            p.push(&format!("{:x}", first_char as usize));
+            p.push(term);
+            if fs::metadata(&p).is_ok() {
+                return Some(p);
             }
         }
     }
     None
 }
 
-/// Return open file for `term`
-pub fn open(term: &str) -> Result<File, String> {
-    match get_dbpath_for_term(term) {
-        Some(x) => {
-            match File::open(&*x) {
-                Ok(file) => Ok(file),
-                Err(e) => Err(format!("error opening file: {:?}", e)),
-            }
-        }
-        None => Err(format!("could not find terminfo entry for {:?}", term)),
-    }
-}
-
 #[test]
 #[ignore(reason = "buildbots don't have ncurses installed and I can't mock everything I need")]
 fn test_get_dbpath_for_term() {
     // woefully inadequate test coverage
-    // note: current tests won't work with non-standard terminfo hierarchies (e.g. OS X's)
+    // note: current tests won't work with non-standard terminfo hierarchies (e.g. macOS's)
     use std::env;
     // FIXME (#9639): This needs to handle non-utf8 paths
     fn x(t: &str) -> String {
@@ -108,12 +91,4 @@ fn test_get_dbpath_for_term() {
     env::set_var("TERMINFO_DIRS", ":");
     assert!(x("screen") == "/usr/share/terminfo/s/screen");
     env::remove_var("TERMINFO_DIRS");
-}
-
-#[test]
-#[ignore(reason = "see test_get_dbpath_for_term")]
-fn test_open() {
-    open("screen").unwrap();
-    let t = open("nonexistent terminal that hopefully does not exist");
-    assert!(t.is_err());
 }

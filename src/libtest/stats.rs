@@ -11,7 +11,7 @@
 #![allow(missing_docs)]
 #![allow(deprecated)] // Float
 
-use std::cmp::Ordering::{self, Less, Greater, Equal};
+use std::cmp::Ordering::{self, Equal, Greater, Less};
 use std::mem;
 
 fn local_cmp(x: f64, y: f64) -> Ordering {
@@ -35,13 +35,14 @@ fn local_sort(v: &mut [f64]) {
 
 /// Trait that provides simple descriptive statistics on a univariate set of numeric samples.
 pub trait Stats {
-
     /// Sum of the samples.
     ///
     /// Note: this method sacrifices performance at the altar of accuracy
     /// Depends on IEEE-754 arithmetic guarantees. See proof of correctness at:
-    /// ["Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric Predicates"]
-    /// (http://www.cs.cmu.edu/~quake-papers/robust-arithmetic.ps)
+    /// ["Adaptive Precision Floating-Point Arithmetic and Fast Robust Geometric
+    /// Predicates"][paper]
+    ///
+    /// [paper]: http://www.cs.cmu.edu/~quake-papers/robust-arithmetic.ps
     fn sum(&self) -> f64;
 
     /// Minimum value of the samples.
@@ -52,13 +53,13 @@ pub trait Stats {
 
     /// Arithmetic mean (average) of the samples: sum divided by sample-count.
     ///
-    /// See: https://en.wikipedia.org/wiki/Arithmetic_mean
+    /// See: <https://en.wikipedia.org/wiki/Arithmetic_mean>
     fn mean(&self) -> f64;
 
     /// Median of the samples: value separating the lower half of the samples from the higher half.
     /// Equal to `self.percentile(50.0)`.
     ///
-    /// See: https://en.wikipedia.org/wiki/Median
+    /// See: <https://en.wikipedia.org/wiki/Median>
     fn median(&self) -> f64;
 
     /// Variance of the samples: bias-corrected mean of the squares of the differences of each
@@ -67,7 +68,7 @@ pub trait Stats {
     /// bias that would appear if we calculated a population variance, by dividing by `(n-1)` rather
     /// than `n`.
     ///
-    /// See: https://en.wikipedia.org/wiki/Variance
+    /// See: <https://en.wikipedia.org/wiki/Variance>
     fn var(&self) -> f64;
 
     /// Standard deviation: the square root of the sample variance.
@@ -75,7 +76,7 @@ pub trait Stats {
     /// Note: this is not a robust statistic for non-normal distributions. Prefer the
     /// `median_abs_dev` for unknown distributions.
     ///
-    /// See: https://en.wikipedia.org/wiki/Standard_deviation
+    /// See: <https://en.wikipedia.org/wiki/Standard_deviation>
     fn std_dev(&self) -> f64;
 
     /// Standard deviation as a percent of the mean value. See `std_dev` and `mean`.
@@ -90,7 +91,7 @@ pub trait Stats {
     /// by the constant `1.4826` to allow its use as a consistent estimator for the standard
     /// deviation.
     ///
-    /// See: http://en.wikipedia.org/wiki/Median_absolute_deviation
+    /// See: <http://en.wikipedia.org/wiki/Median_absolute_deviation>
     fn median_abs_dev(&self) -> f64;
 
     /// Median absolute deviation as a percent of the median. See `median_abs_dev` and `median`.
@@ -102,7 +103,7 @@ pub trait Stats {
     ///
     /// Calculated by linear interpolation between closest ranks.
     ///
-    /// See: http://en.wikipedia.org/wiki/Percentile
+    /// See: <http://en.wikipedia.org/wiki/Percentile>
     fn percentile(&self, pct: f64) -> f64;
 
     /// Quartiles of the sample: three values that divide the sample into four equal groups, each
@@ -110,18 +111,18 @@ pub trait Stats {
     /// function may calculate the 3 quartiles more efficiently than 3 calls to `percentile`, but
     /// is otherwise equivalent.
     ///
-    /// See also: https://en.wikipedia.org/wiki/Quartile
-    fn quartiles(&self) -> (f64,f64,f64);
+    /// See also: <https://en.wikipedia.org/wiki/Quartile>
+    fn quartiles(&self) -> (f64, f64, f64);
 
     /// Inter-quartile range: the difference between the 25th percentile (1st quartile) and the 75th
     /// percentile (3rd quartile). See `quartiles`.
     ///
-    /// See also: https://en.wikipedia.org/wiki/Interquartile_range
+    /// See also: <https://en.wikipedia.org/wiki/Interquartile_range>
     fn iqr(&self) -> f64;
 }
 
 /// Extracted collection of all the summary statistics of a sample set.
-#[derive(Clone, PartialEq)]
+#[derive(Clone, PartialEq, Copy)]
 #[allow(missing_docs)]
 pub struct Summary {
     pub sum: f64,
@@ -134,7 +135,7 @@ pub struct Summary {
     pub std_dev_pct: f64,
     pub median_abs_dev: f64,
     pub median_abs_dev_pct: f64,
-    pub quartiles: (f64,f64,f64),
+    pub quartiles: (f64, f64, f64),
     pub iqr: f64,
 }
 
@@ -153,7 +154,7 @@ impl Summary {
             median_abs_dev: samples.median_abs_dev(),
             median_abs_dev_pct: samples.median_abs_dev_pct(),
             quartiles: samples.quartiles(),
-            iqr: samples.iqr()
+            iqr: samples.iqr(),
         }
     }
 }
@@ -187,7 +188,7 @@ impl Stats for [f64] {
                 partials.push(x);
             } else {
                 partials[j] = x;
-                partials.truncate(j+1);
+                partials.truncate(j + 1);
             }
         }
         let zero: f64 = 0.0;
@@ -221,13 +222,13 @@ impl Stats for [f64] {
             let mut v: f64 = 0.0;
             for s in self {
                 let x = *s - mean;
-                v = v + x*x;
+                v = v + x * x;
             }
             // NB: this is _supposed to be_ len-1, not len. If you
             // change it back to len, you will be calculating a
             // population variance, not a sample variance.
             let denom = (self.len() - 1) as f64;
-            v/denom
+            v / denom
         }
     }
 
@@ -260,24 +261,23 @@ impl Stats for [f64] {
         percentile_of_sorted(&tmp, pct)
     }
 
-    fn quartiles(&self) -> (f64,f64,f64) {
+    fn quartiles(&self) -> (f64, f64, f64) {
         let mut tmp = self.to_vec();
         local_sort(&mut tmp);
         let first = 25f64;
         let a = percentile_of_sorted(&tmp, first);
-        let secound = 50f64;
-        let b = percentile_of_sorted(&tmp, secound);
+        let second = 50f64;
+        let b = percentile_of_sorted(&tmp, second);
         let third = 75f64;
         let c = percentile_of_sorted(&tmp, third);
-        (a,b,c)
+        (a, b, c)
     }
 
     fn iqr(&self) -> f64 {
-        let (a,_,c) = self.quartiles();
+        let (a, _, c) = self.quartiles();
         c - a
     }
 }
-
 
 // Helper function: extract a value representing the `pct` percentile of a sorted sample-set, using
 // linear interpolation. If samples are not sorted, return nonsensical value.
@@ -299,10 +299,9 @@ fn percentile_of_sorted(sorted_samples: &[f64], pct: f64) -> f64 {
     let d = rank - lrank;
     let n = lrank as usize;
     let lo = sorted_samples[n];
-    let hi = sorted_samples[n+1];
+    let hi = sorted_samples[n + 1];
     lo + (hi - lo) * d
 }
-
 
 /// Winsorize a set of samples, replacing values above the `100-pct` percentile
 /// and below the `pct` percentile with those percentiles themselves. This is a
@@ -310,13 +309,13 @@ fn percentile_of_sorted(sorted_samples: &[f64], pct: f64) -> f64 {
 /// It differs from trimming in that it does not change the number of samples,
 /// just changes the values of those that are outliers.
 ///
-/// See: http://en.wikipedia.org/wiki/Winsorising
+/// See: <http://en.wikipedia.org/wiki/Winsorising>
 pub fn winsorize(samples: &mut [f64], pct: f64) {
     let mut tmp = samples.to_vec();
     local_sort(&mut tmp);
     let lo = percentile_of_sorted(&tmp, pct);
     let hundred = 100 as f64;
-    let hi = percentile_of_sorted(&tmp, hundred-pct);
+    let hi = percentile_of_sorted(&tmp, hundred - pct);
     for samp in samples {
         if *samp > hi {
             *samp = hi
@@ -337,15 +336,18 @@ mod tests {
     use std::io;
 
     macro_rules! assert_approx_eq {
-        ($a:expr, $b:expr) => ({
+        ($a: expr, $b: expr) => {{
             let (a, b) = (&$a, &$b);
-            assert!((*a - *b).abs() < 1.0e-6,
-                    "{} is not approximately equal to {}", *a, *b);
-        })
+            assert!(
+                (*a - *b).abs() < 1.0e-6,
+                "{} is not approximately equal to {}",
+                *a,
+                *b
+            );
+        }};
     }
 
     fn check(samples: &[f64], summ: &Summary) {
-
         let summ2 = Summary::new(samples);
 
         let mut w = io::sink();
@@ -380,10 +382,7 @@ mod tests {
 
     #[test]
     fn test_norm2() {
-        let val = &[
-            958.0000000000,
-            924.0000000000,
-        ];
+        let val = &[958.0000000000, 924.0000000000];
         let summ = &Summary {
             sum: 1882.0000000000,
             min: 924.0000000000,
@@ -395,7 +394,7 @@ mod tests {
             std_dev_pct: 2.5549022912,
             median_abs_dev: 25.2042000000,
             median_abs_dev_pct: 2.6784484591,
-            quartiles: (932.5000000000,941.0000000000,949.5000000000),
+            quartiles: (932.5000000000, 941.0000000000, 949.5000000000),
             iqr: 17.0000000000,
         };
         check(val, summ);
@@ -425,7 +424,7 @@ mod tests {
             std_dev_pct: 12.6742097933,
             median_abs_dev: 102.2994000000,
             median_abs_dev_pct: 10.5408964451,
-            quartiles: (956.7500000000,970.5000000000,1078.7500000000),
+            quartiles: (956.7500000000, 970.5000000000, 1078.7500000000),
             iqr: 122.0000000000,
         };
         check(val, summ);
@@ -455,7 +454,7 @@ mod tests {
             std_dev_pct: 25.4846418487,
             median_abs_dev: 195.7032000000,
             median_abs_dev_pct: 21.4704552935,
-            quartiles: (771.0000000000,911.5000000000,1017.2500000000),
+            quartiles: (771.0000000000, 911.5000000000, 1017.2500000000),
             iqr: 246.2500000000,
         };
         check(val, summ);
@@ -485,7 +484,7 @@ mod tests {
             std_dev_pct: 52.3146817750,
             median_abs_dev: 611.5725000000,
             median_abs_dev_pct: 66.9482758621,
-            quartiles: (567.2500000000,913.5000000000,1331.2500000000),
+            quartiles: (567.2500000000, 913.5000000000, 1331.2500000000),
             iqr: 764.0000000000,
         };
         check(val, summ);
@@ -530,7 +529,7 @@ mod tests {
             std_dev_pct: 1.9888308788,
             median_abs_dev: 22.2390000000,
             median_abs_dev_pct: 2.2283567134,
-            quartiles: (983.0000000000,998.0000000000,1013.0000000000),
+            quartiles: (983.0000000000, 998.0000000000, 1013.0000000000),
             iqr: 30.0000000000,
         };
         check(val, summ);
@@ -560,7 +559,7 @@ mod tests {
             std_dev_pct: 101.5828843560,
             median_abs_dev: 13.3434000000,
             median_abs_dev_pct: 116.0295652174,
-            quartiles: (4.2500000000,11.5000000000,22.5000000000),
+            quartiles: (4.2500000000, 11.5000000000, 22.5000000000),
             iqr: 18.2500000000,
         };
         check(val, summ);
@@ -590,7 +589,7 @@ mod tests {
             std_dev_pct: 74.4671410520,
             median_abs_dev: 22.9803000000,
             median_abs_dev_pct: 93.7971428571,
-            quartiles: (9.5000000000,24.5000000000,36.5000000000),
+            quartiles: (9.5000000000, 24.5000000000, 36.5000000000),
             iqr: 27.0000000000,
         };
         check(val, summ);
@@ -620,7 +619,7 @@ mod tests {
             std_dev_pct: 88.4507754589,
             median_abs_dev: 21.4977000000,
             median_abs_dev_pct: 97.7168181818,
-            quartiles: (7.7500000000,22.0000000000,35.0000000000),
+            quartiles: (7.7500000000, 22.0000000000, 35.0000000000),
             iqr: 27.2500000000,
         };
         check(val, summ);
@@ -665,7 +664,7 @@ mod tests {
             std_dev_pct: 103.3565983562,
             median_abs_dev: 19.2738000000,
             median_abs_dev_pct: 101.4410526316,
-            quartiles: (6.0000000000,19.0000000000,31.0000000000),
+            quartiles: (6.0000000000, 19.0000000000, 31.0000000000),
             iqr: 25.0000000000,
         };
         check(val, summ);
@@ -710,7 +709,7 @@ mod tests {
             std_dev_pct: 22.2037202539,
             median_abs_dev: 5.9304000000,
             median_abs_dev_pct: 29.6520000000,
-            quartiles: (17.0000000000,20.0000000000,24.0000000000),
+            quartiles: (17.0000000000, 20.0000000000, 24.0000000000),
             iqr: 7.0000000000,
         };
         check(val, summ);
@@ -755,7 +754,7 @@ mod tests {
             std_dev_pct: 16.3814245145,
             median_abs_dev: 5.9304000000,
             median_abs_dev_pct: 18.5325000000,
-            quartiles: (28.0000000000,32.0000000000,34.0000000000),
+            quartiles: (28.0000000000, 32.0000000000, 34.0000000000),
             iqr: 6.0000000000,
         };
         check(val, summ);
@@ -800,7 +799,7 @@ mod tests {
             std_dev_pct: 14.3978417577,
             median_abs_dev: 5.9304000000,
             median_abs_dev_pct: 14.1200000000,
-            quartiles: (37.0000000000,42.0000000000,45.0000000000),
+            quartiles: (37.0000000000, 42.0000000000, 45.0000000000),
             iqr: 8.0000000000,
         };
         check(val, summ);
@@ -845,7 +844,7 @@ mod tests {
             std_dev_pct: 11.3913245723,
             median_abs_dev: 4.4478000000,
             median_abs_dev_pct: 8.8956000000,
-            quartiles: (44.0000000000,50.0000000000,52.0000000000),
+            quartiles: (44.0000000000, 50.0000000000, 52.0000000000),
             iqr: 8.0000000000,
         };
         check(val, summ);
@@ -890,7 +889,7 @@ mod tests {
             std_dev_pct: 64.1488719719,
             median_abs_dev: 45.9606000000,
             median_abs_dev_pct: 102.1346666667,
-            quartiles: (29.0000000000,45.0000000000,79.0000000000),
+            quartiles: (29.0000000000, 45.0000000000, 79.0000000000),
             iqr: 50.0000000000,
         };
         check(val, summ);
@@ -920,10 +919,13 @@ mod bench {
     #[bench]
     pub fn sum_many_f64(b: &mut Bencher) {
         let nums = [-1e30f64, 1e60, 1e30, 1.0, -1e60];
-        let v = (0..500).map(|i| nums[i%5]).collect::<Vec<_>>();
+        let v = (0..500).map(|i| nums[i % 5]).collect::<Vec<_>>();
 
         b.iter(|| {
             v.sum();
         })
     }
+
+    #[bench]
+    pub fn no_iter(_: &mut Bencher) {}
 }

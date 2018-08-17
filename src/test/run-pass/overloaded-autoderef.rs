@@ -8,8 +8,7 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![allow(unknown_features)]
-#![feature(box_syntax, collections, core)]
+#![feature(box_syntax, core)]
 
 use std::cell::RefCell;
 use std::rc::Rc;

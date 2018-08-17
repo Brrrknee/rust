@@ -36,6 +36,10 @@ impl Stdout {
         fd.into_raw();
         ret
     }
+
+    pub fn flush(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 impl Stderr {
@@ -47,6 +51,10 @@ impl Stderr {
         fd.into_raw();
         ret
     }
+
+    pub fn flush(&self) -> io::Result<()> {
+        Ok(())
+    }
 }
 
 // FIXME: right now this raw stderr handle is used in a few places because
@@ -56,5 +64,18 @@ impl io::Write for Stderr {
     fn write(&mut self, data: &[u8]) -> io::Result<usize> {
         Stderr::write(self, data)
     }
-    fn flush(&mut self) -> io::Result<()> { Ok(()) }
+
+    fn flush(&mut self) -> io::Result<()> {
+        Stderr::flush(self)
+    }
+}
+
+pub fn is_ebadf(err: &io::Error) -> bool {
+    err.raw_os_error() == Some(libc::EBADF as i32)
+}
+
+pub const STDIN_BUF_SIZE: usize = ::sys_common::io::DEFAULT_BUF_SIZE;
+
+pub fn stderr_prints_nothing() -> bool {
+    false
 }

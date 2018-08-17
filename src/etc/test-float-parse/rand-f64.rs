@@ -8,8 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![feature(rand)]
-
 extern crate rand;
 
 mod _common;
@@ -25,7 +23,7 @@ fn main() {
         let bits = rnd.next_u64();
         let x: f64 = unsafe { transmute(bits) };
         if x.is_finite() {
-            validate(format!("{:e}", x));
+            validate(&format!("{:e}", x));
             i += 1;
         }
     }

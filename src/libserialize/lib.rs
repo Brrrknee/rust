@@ -14,15 +14,6 @@
 Core encoding and decoding interfaces.
 */
 
-// Do not remove on snapshot creation. Needed for bootstrap. (Issue #22364)
-#![cfg_attr(stage0, feature(custom_attribute))]
-#![crate_name = "serialize"]
-#![unstable(feature = "rustc_private",
-            reason = "deprecated in favor of rustc-serialize on crates.io",
-            issue = "27812")]
-#![cfg_attr(stage0, staged_api)]
-#![crate_type = "rlib"]
-#![crate_type = "dylib"]
 #![doc(html_logo_url = "https://www.rust-lang.org/logos/rust-logo-128x128-blk-v2.png",
        html_favicon_url = "https://doc.rust-lang.org/favicon.ico",
        html_root_url = "https://doc.rust-lang.org/nightly/",
@@ -30,31 +21,25 @@ Core encoding and decoding interfaces.
        test(attr(allow(unused_variables), deny(warnings))))]
 
 #![feature(box_syntax)]
-#![feature(collections)]
-#![feature(enumset)]
-#![feature(hashmap_hasher)]
-#![feature(num_bits_bytes)]
-#![feature(rustc_private)]
-#![feature(staged_api)]
-#![feature(str_char)]
-#![feature(unicode)]
+#![feature(core_intrinsics)]
+#![feature(specialization)]
+#![feature(never_type)]
+#![cfg_attr(not(stage0), feature(nll))]
 #![cfg_attr(test, feature(test))]
 
-// test harness access
-#[cfg(test)] extern crate test;
-#[macro_use] extern crate log;
+pub use self::serialize::{Decoder, Encoder, Decodable, Encodable};
 
-extern crate rustc_unicode;
-extern crate collections;
-
-pub use self::serialize::{Decoder, Encoder, Decodable, Encodable,
-                          DecoderHelpers, EncoderHelpers};
+pub use self::serialize::{SpecializationError, SpecializedEncoder, SpecializedDecoder};
+pub use self::serialize::{UseSpecializedEncodable, UseSpecializedDecodable};
 
 mod serialize;
 mod collection_impls;
 
 pub mod hex;
 pub mod json;
+
+pub mod opaque;
+pub mod leb128;
 
 mod rustc_serialize {
     pub use serialize::*;

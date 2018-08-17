@@ -8,8 +8,10 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-// error-pattern:thread '<main>' panicked at 'arithmetic operation overflowed'
+// error-pattern:thread 'main' panicked at 'attempt to multiply with overflow'
 // compile-flags: -C debug-assertions
+
+#![allow(const_err)]
 
 fn main() {
     let x = 200u8 * 4;

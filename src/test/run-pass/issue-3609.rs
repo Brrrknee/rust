@@ -8,9 +8,6 @@
 // option. This file may not be copied, modified, or distributed
 // except according to those terms.
 
-#![allow(unknown_features)]
-#![feature(std_misc)]
-
 use std::thread;
 use std::sync::mpsc::Sender;
 
@@ -26,7 +23,6 @@ fn foo(name: String, samples_chan: Sender<Msg>) {
     thread::spawn(move|| {
         let mut samples_chan = samples_chan;
 
-        // FIXME (#22405): Replace `Box::new` with `box` here when/if possible.
         let callback: SamplesFn = Box::new(move |buffer| {
             for i in 0..buffer.len() {
                 println!("{}: {}", i, buffer[i])
